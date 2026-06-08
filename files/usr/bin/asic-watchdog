@@ -1003,7 +1003,8 @@ telegram_status_menu() {
 	updated="$(status_updated)"
 	menu_file="$RUNDIR/tg-menu-$$.miners"
 	miner_objects >"$menu_file"
-	body=""
+	ok_body=""
+	issue_body=""
 	total=0
 	ok_count=0
 	issue_count=0
@@ -1029,21 +1030,39 @@ telegram_status_menu() {
 		temp_fmt="$(format_temp "$temp")"
 		fan_fmt="$(format_fan "$fan_min")"
 		total=$((total + 1))
+		row="${icon} ${name}
+   ${ip} · ${label}
+   ⚡ ${hash_fmt} | 🌡 ${temp_fmt} | 🌀 ${fan_fmt} | ❌ ${bad_pct}%
+"
 		case "$status" in
-			ok) ok_count=$((ok_count + 1)) ;;
-			api_down) issue_count=$((issue_count + 1)); down_count=$((down_count + 1)) ;;
-			overheat) issue_count=$((issue_count + 1)); hot_count=$((hot_count + 1)) ;;
-			fan_fault) issue_count=$((issue_count + 1)); fan_fault_count=$((fan_fault_count + 1)) ;;
-			*) issue_count=$((issue_count + 1)) ;;
+			ok)
+				ok_count=$((ok_count + 1))
+				ok_body="${ok_body}${row}"
+				;;
+			api_down)
+				issue_count=$((issue_count + 1))
+				down_count=$((down_count + 1))
+				issue_body="${issue_body}${row}"
+				;;
+			overheat)
+				issue_count=$((issue_count + 1))
+				hot_count=$((hot_count + 1))
+				issue_body="${issue_body}${row}"
+				;;
+			fan_fault)
+				issue_count=$((issue_count + 1))
+				fan_fault_count=$((fan_fault_count + 1))
+				issue_body="${issue_body}${row}"
+				;;
+			*)
+				issue_count=$((issue_count + 1))
+				issue_body="${issue_body}${row}"
+				;;
 		esac
 		if gt_num "$temp" "$max_seen"; then max_seen="$temp"; fi
 		if [ "$fan_min" != "0" ] && { [ "$min_fan_seen" = "0" ] || gt_num "$min_fan_seen" "$fan_min"; }; then min_fan_seen="$fan_min"; fi
-		body="${body}${icon} ${name}
-   ${label} · ${ip}
-   ⚡ ${hash_fmt}   🌡 ${temp_fmt}   🌀 ${fan_fmt}   ❌ ${bad_pct}%
-"
 		btn_text="$(printf 'ℹ️ %s %s' "$short" "$name" | json_escape)"
-		reboot_text="$(printf '🔁 Перезагрузка %s' "$name" | json_escape)"
+		reboot_text="$(printf '🔁 %s' "$name" | json_escape)"
 		markup="${markup},[{\"text\":\"$btn_text\",\"callback_data\":\"detail:$i\"},{\"text\":\"$reboot_text\",\"callback_data\":\"reboot:$i\"}]"
 		i=$((i + 1))
 	done <"$menu_file"
@@ -1051,15 +1070,22 @@ telegram_status_menu() {
 	markup="${markup}]}"
 	max_temp_fmt="$(format_temp "$max_seen")"
 	min_fan_fmt="$(format_fan "$min_fan_seen")"
+	[ -n "$issue_body" ] || issue_body="   Нет проблем
+"
+	[ -n "$ok_body" ] || ok_body="   Нет ASIC в норме
+"
 	text="📊 Мониторинг ASIC
 🕘 ${updated:-unknown}
 
-🟢 В норме: ${ok_count}/${total}   🔴 Проблемы: ${issue_count}
-🔥 Перегрев: ${hot_count}   🌀 Вентилятор: ${fan_fault_count}   🌐 Нет связи: ${down_count}
-🌡 Макс. температура: ${max_temp_fmt}   🌀 Мин. вентилятор: ${min_fan_fmt}
+Итог: 🟢 ${ok_count}/${total} в норме · 🔴 ${issue_count} проблем
+🔥 Перегрев: ${hot_count} · 🌀 Вентилятор: ${fan_fault_count} · 🌐 Нет связи: ${down_count}
+🌡 Макс: ${max_temp_fmt} · 🌀 Мин. вент: ${min_fan_fmt}
 
-${body}
-Нажми ℹ️ для подробностей или 🔁 для перезагрузки с подтверждением."
+🚨 Требуют внимания
+${issue_body}
+✅ В норме
+${ok_body}
+Кнопки ниже: ℹ️ детали, 🔁 перезагрузка с подтверждением."
 	telegram_send_markup "$text" "$markup" "$chat_id"
 }
 
