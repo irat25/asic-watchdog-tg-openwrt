@@ -1,0 +1,14 @@
+{
+	"admin/services/asic-watchdog": {
+		"title": "ASIC Watchdog",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "asic-watchdog/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-asic-watchdog" ]
+		}
+	}
+}
+

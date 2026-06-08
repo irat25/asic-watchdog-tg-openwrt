@@ -1,0 +1,16 @@
+{
+	"luci-app-asic-watchdog": {
+		"description": "Grant access to ASIC Watchdog",
+		"read": {
+			"file": {
+				"/usr/libexec/asic-watchdog-luci": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/asic-watchdog-luci": [ "exec" ]
+			}
+		}
+	}
+}
+

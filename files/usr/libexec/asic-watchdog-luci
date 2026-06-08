@@ -1,0 +1,270 @@
+#!/bin/sh
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="asic_watchdog"
+BIN="/usr/bin/asic-watchdog"
+SERVICE="/etc/init.d/asic-watchdog"
+
+json_escape() {
+	awk '{
+		gsub(/\\/, "\\\\")
+		gsub(/"/, "\\\"")
+		gsub(/\t/, "\\t")
+		gsub(/\r/, "")
+		if (NR > 1) printf "\\n"
+		printf "%s", $0
+	}'
+}
+
+jfield() {
+	printf '"%s":"%s"' "$1" "$(printf '%s' "$2" | json_escape)"
+}
+
+param() {
+	key="$1"
+	shift
+	for arg in "$@"; do
+		case "$arg" in
+			"$key="*) printf '%s' "${arg#*=}"; return ;;
+		esac
+	done
+}
+
+ok() {
+	printf '{"ok":true'
+	[ -n "$1" ] && {
+		printf ','
+		jfield message "$1"
+	}
+	printf '}\n'
+}
+
+fail() {
+	printf '{"ok":false,'
+	jfield error "$1"
+	printf '}\n'
+}
+
+miner_sections() {
+	uci -q show "$CONFIG" 2>/dev/null | sed -n "s/^$CONFIG\.\(@miner\[[0-9][0-9]*\]\)=miner$/\1/p"
+}
+
+section_cfg() {
+	uci -q get "$CONFIG.$1.$2" 2>/dev/null || printf '%s' "${3:-}"
+}
+
+config_json() {
+	printf '{'
+	jfield enabled "$(uci -q get "$CONFIG.main.enabled" 2>/dev/null || echo 1)"; printf ','
+	jfield interval "$(uci -q get "$CONFIG.main.interval" 2>/dev/null || echo 60)"; printf ','
+	jfield alert_cooldown "$(uci -q get "$CONFIG.main.alert_cooldown" 2>/dev/null || echo 3600)"; printf ','
+	jfield max_temp "$(uci -q get "$CONFIG.main.max_temp" 2>/dev/null || echo 85)"; printf ','
+	jfield min_hashrate "$(uci -q get "$CONFIG.main.min_hashrate" 2>/dev/null || echo 1)"; printf ','
+	jfield bad_share_percent "$(uci -q get "$CONFIG.main.bad_share_percent" 2>/dev/null || echo 3)"; printf ','
+	jfield max_hw_errors_delta "$(uci -q get "$CONFIG.main.max_hw_errors_delta" 2>/dev/null || echo 100)"; printf ','
+	jfield min_fan_rpm "$(uci -q get "$CONFIG.main.min_fan_rpm" 2>/dev/null || echo 1000)"; printf ','
+	jfield fail_cycles "$(uci -q get "$CONFIG.main.fail_cycles" 2>/dev/null || echo 2)"; printf ','
+	jfield auto_reboot_on_overheat "$(uci -q get "$CONFIG.main.auto_reboot_on_overheat" 2>/dev/null || echo 0)"; printf ','
+	jfield auto_reboot_on_idle "$(uci -q get "$CONFIG.main.auto_reboot_on_idle" 2>/dev/null || echo 0)"; printf ','
+	jfield auto_reboot_on_bad_shares "$(uci -q get "$CONFIG.main.auto_reboot_on_bad_shares" 2>/dev/null || echo 0)"; printf ','
+	jfield telegram_enabled "$(uci -q get "$CONFIG.main.telegram_enabled" 2>/dev/null || echo 0)"; printf ','
+	jfield chat_id "$(uci -q get "$CONFIG.main.chat_id" 2>/dev/null || true)"; printf ','
+	jfield bot_token_set "$([ -n "$(uci -q get "$CONFIG.main.bot_token" 2>/dev/null)" ] && echo 1 || echo 0)"; printf ','
+	printf '"miners":['
+	first=1
+	for sec in $(miner_sections); do
+		[ "$first" = 0 ] && printf ','
+		first=0
+		printf '{'
+		jfield section "$sec"; printf ','
+		jfield name "$(section_cfg "$sec" name "$sec")"; printf ','
+		jfield ip "$(section_cfg "$sec" ip)"; printf ','
+		jfield model "$(section_cfg "$sec" model generic)"; printf ','
+		jfield api_port "$(section_cfg "$sec" api_port 4028)"; printf ','
+		jfield reboot_method "$(section_cfg "$sec" reboot_method api)"; printf ','
+		jfield enabled "$(section_cfg "$sec" enabled 1)"; printf ','
+		jfield user "$(section_cfg "$sec" user)"; printf ','
+		jfield max_temp "$(section_cfg "$sec" max_temp)"; printf ','
+		jfield min_hashrate "$(section_cfg "$sec" min_hashrate)"; printf ','
+		jfield password_set "$([ -n "$(section_cfg "$sec" password)" ] && echo 1 || echo 0)"
+		printf '}'
+	done
+	printf ']}\n'
+}
+
+status_json() {
+	status="$($BIN status-json 2>/dev/null || echo '{"miners":[]}')"
+	cfg="$(config_json)"
+	printf '{"ok":true,"status":%s,"config":%s}\n' "$status" "$cfg"
+}
+
+save_settings() {
+	uci set "$CONFIG.main.enabled=$(param enabled "$@")"
+	uci set "$CONFIG.main.interval=$(param interval "$@")"
+	uci set "$CONFIG.main.alert_cooldown=$(param alert_cooldown "$@")"
+	uci set "$CONFIG.main.max_temp=$(param max_temp "$@")"
+	uci set "$CONFIG.main.min_hashrate=$(param min_hashrate "$@")"
+	uci set "$CONFIG.main.bad_share_percent=$(param bad_share_percent "$@")"
+	uci set "$CONFIG.main.max_hw_errors_delta=$(param max_hw_errors_delta "$@")"
+	uci set "$CONFIG.main.min_fan_rpm=$(param min_fan_rpm "$@")"
+	uci set "$CONFIG.main.fail_cycles=$(param fail_cycles "$@")"
+	uci set "$CONFIG.main.auto_reboot_on_overheat=$(param auto_reboot_on_overheat "$@")"
+	uci set "$CONFIG.main.auto_reboot_on_idle=$(param auto_reboot_on_idle "$@")"
+	uci set "$CONFIG.main.auto_reboot_on_bad_shares=$(param auto_reboot_on_bad_shares "$@")"
+	uci set "$CONFIG.main.telegram_enabled=$(param telegram_enabled "$@")"
+	uci set "$CONFIG.main.chat_id=$(param chat_id "$@")"
+	token="$(param bot_token "$@")"
+	[ -n "$token" ] && uci set "$CONFIG.main.bot_token=$token"
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "settings saved"
+}
+
+add_miner() {
+	ip="$(param ip "$@")"
+	[ -n "$ip" ] || {
+		fail "ip is required"
+		return
+	}
+	name="$(param name "$@")"
+	[ -n "$name" ] || name="$ip"
+	api_port="$(param api_port "$@")"
+	[ -n "$api_port" ] || api_port="4028"
+	model="$(param model "$@")"
+	[ -n "$model" ] || model="generic"
+	reboot_method="$(param reboot_method "$@")"
+	[ -n "$reboot_method" ] || reboot_method="api"
+	sec="$(uci add "$CONFIG" miner)"
+	uci set "$CONFIG.$sec.enabled=1"
+	uci set "$CONFIG.$sec.name=$name"
+	uci set "$CONFIG.$sec.ip=$ip"
+	uci set "$CONFIG.$sec.model=$model"
+	uci set "$CONFIG.$sec.api_port=$api_port"
+	uci set "$CONFIG.$sec.reboot_method=$reboot_method"
+	uci set "$CONFIG.$sec.user=$(param user "$@")"
+	uci set "$CONFIG.$sec.password=$(param password "$@")"
+	max_temp="$(param max_temp "$@")"
+	min_hashrate="$(param min_hashrate "$@")"
+	[ -n "$max_temp" ] && uci set "$CONFIG.$sec.max_temp=$max_temp"
+	[ -n "$min_hashrate" ] && uci set "$CONFIG.$sec.min_hashrate=$min_hashrate"
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "miner added"
+}
+
+edit_miner() {
+	sec="$(param section "$@")"
+	[ -n "$sec" ] || {
+		fail "section is required"
+		return
+	}
+	uci -q get "$CONFIG.$sec" >/dev/null 2>&1 || {
+		fail "miner not found"
+		return
+	}
+	ip="$(param ip "$@")"
+	[ -n "$ip" ] || {
+		fail "ip is required"
+		return
+	}
+	name="$(param name "$@")"
+	[ -n "$name" ] || name="$ip"
+	api_port="$(param api_port "$@")"
+	[ -n "$api_port" ] || api_port="4028"
+	model="$(param model "$@")"
+	[ -n "$model" ] || model="generic"
+	reboot_method="$(param reboot_method "$@")"
+	[ -n "$reboot_method" ] || reboot_method="api"
+	enabled="$(param enabled "$@")"
+	[ -n "$enabled" ] || enabled="1"
+
+	uci set "$CONFIG.$sec.enabled=$enabled"
+	uci set "$CONFIG.$sec.name=$name"
+	uci set "$CONFIG.$sec.ip=$ip"
+	uci set "$CONFIG.$sec.model=$model"
+	uci set "$CONFIG.$sec.api_port=$api_port"
+	uci set "$CONFIG.$sec.reboot_method=$reboot_method"
+	uci set "$CONFIG.$sec.user=$(param user "$@")"
+	password="$(param password "$@")"
+	[ -n "$password" ] && uci set "$CONFIG.$sec.password=$password"
+
+	max_temp="$(param max_temp "$@")"
+	min_hashrate="$(param min_hashrate "$@")"
+	if [ -n "$max_temp" ]; then
+		uci set "$CONFIG.$sec.max_temp=$max_temp"
+	else
+		uci -q delete "$CONFIG.$sec.max_temp" 2>/dev/null || true
+	fi
+	if [ -n "$min_hashrate" ]; then
+		uci set "$CONFIG.$sec.min_hashrate=$min_hashrate"
+	else
+		uci -q delete "$CONFIG.$sec.min_hashrate" 2>/dev/null || true
+	fi
+
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "miner saved"
+}
+
+delete_miner() {
+	sec="$(param section "$@")"
+	[ -n "$sec" ] || {
+		fail "section is required"
+		return
+	}
+	uci delete "$CONFIG.$sec" 2>/dev/null || {
+		fail "delete failed"
+		return
+	}
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "miner deleted"
+}
+
+reboot_miner() {
+	target="$(param target "$@")"
+	[ -n "$target" ] || target="$(param section "$@")"
+	out="$($BIN reboot "$target" 2>&1)"
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		ok "$out"
+	else
+		fail "$out"
+	fi
+}
+
+service_action() {
+	cmd="$(param cmd "$@")"
+	case "$cmd" in
+		start|stop|restart|enable|disable)
+			out="$($SERVICE "$cmd" 2>&1)"
+			ok "$out"
+			;;
+		run-once)
+			out="$($BIN run-once 2>&1)"
+			ok "$out"
+			;;
+		telegram-test)
+			out="$($BIN telegram-test 2>&1)"
+			ok "$out"
+			;;
+		*)
+			fail "bad service command"
+			;;
+	esac
+}
+
+action="${1:-status}"
+shift 2>/dev/null || true
+
+case "$action" in
+	status) status_json ;;
+	save_settings) save_settings "$@" ;;
+	add_miner) add_miner "$@" ;;
+	edit_miner) edit_miner "$@" ;;
+	delete_miner) delete_miner "$@" ;;
+	reboot_miner) reboot_miner "$@" ;;
+	service) service_action "$@" ;;
+	*) fail "unknown action" ;;
+esac

@@ -1,0 +1,1194 @@
+#!/bin/sh
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="asic_watchdog"
+RUNDIR="/tmp/asic-watchdog"
+STATUS_FILE="$RUNDIR/status.json"
+STATUS_TMP="$RUNDIR/status.json.tmp"
+LOCK_FILE="$RUNDIR/monitor.lock"
+TG_OFFSET_FILE="$RUNDIR/telegram.offset"
+
+mkdir -p "$RUNDIR"
+
+log() {
+	logger -t asic-watchdog "$*"
+}
+
+cfg() {
+	uci -q get "$CONFIG.main.$1" 2>/dev/null || printf '%s' "${2:-}"
+}
+
+section_cfg() {
+	uci -q get "$CONFIG.$1.$2" 2>/dev/null || printf '%s' "${3:-}"
+}
+
+json_escape() {
+	awk '{
+		gsub(/\\/, "\\\\")
+		gsub(/"/, "\\\"")
+		gsub(/\t/, "\\t")
+		gsub(/\r/, "")
+		if (NR > 1) printf "\\n"
+		printf "%s", $0
+	}'
+}
+
+jfield() {
+	printf '"%s":"%s"' "$1" "$(printf '%s' "$2" | json_escape)"
+}
+
+now() {
+	date +%s
+}
+
+miner_sections() {
+	uci -q show "$CONFIG" 2>/dev/null | sed -n "s/^$CONFIG\.\(@miner\[[0-9][0-9]*\]\)=miner$/\1/p"
+}
+
+safe_id() {
+	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/_/g'
+}
+
+num_or_zero() {
+	printf '%s' "$1" | sed 's/,/./g; s/[^0-9.].*$//' | awk 'NF && $1+0==$1 { print $1+0; ok=1 } END { if (!ok) print 0 }'
+}
+
+ge_num() {
+	awk -v a="$(num_or_zero "$1")" -v b="$(num_or_zero "$2")" 'BEGIN { exit !(a >= b) }'
+}
+
+gt_num() {
+	awk -v a="$(num_or_zero "$1")" -v b="$(num_or_zero "$2")" 'BEGIN { exit !(a > b) }'
+}
+
+pct_gt() {
+	awk -v a="$(num_or_zero "$1")" -v b="$(num_or_zero "$2")" 'BEGIN { exit !(a > b) }'
+}
+
+cgminer_cmd() {
+	ip="$1"
+	port="$2"
+	command="$3"
+	timeout="$(cfg api_timeout 4)"
+	api_id="$(safe_id "$ip-$port-$command-$$")"
+	api_in="$RUNDIR/api-$api_id.in"
+	api_out="$RUNDIR/api-$api_id.out"
+	api_err="$RUNDIR/api-$api_id.err"
+	printf '{"command":"%s"}' "$command" >"$api_in"
+	nc "$ip" "$port" <"$api_in" >"$api_out" 2>"$api_err" &
+	api_pid="$!"
+	api_wait=0
+	while kill -0 "$api_pid" 2>/dev/null; do
+		if [ "$api_wait" -ge "$timeout" ]; then
+			kill "$api_pid" 2>/dev/null || true
+			break
+		fi
+		sleep 1
+		api_wait=$((api_wait + 1))
+	done
+	wait "$api_pid" 2>/dev/null || true
+	cat "$api_out" 2>/dev/null | tr '\000' '\n'
+	rm -f "$api_in" "$api_out" "$api_err"
+}
+
+field_from_text() {
+	key="$1"
+	tr ',|' '\n\n' | awk -v key="$key" '
+	{
+		line=$0
+		gsub(/^[[:space:]{\[]+/, "", line)
+		if (substr(line, 1, 1) == "\"")
+			line=substr(line, 2)
+		if (index(line, key) == 1) {
+			line=substr(line, length(key) + 1)
+			if (substr(line, 1, 1) == "\"")
+				line=substr(line, 2)
+			sub(/^[[:space:]]*[:=][[:space:]"]*/, "", line)
+			sub(/[,"|}].*$/, "", line)
+			print line
+			exit
+		}
+	}'
+}
+
+first_field() {
+	text="$1"
+	shift
+	while [ "$#" -gt 0 ]; do
+		value="$(printf '%s' "$text" | field_from_text "$1")"
+		[ -n "$value" ] && {
+			printf '%s' "$value"
+			return
+		}
+		shift
+	done
+}
+
+append_value() {
+	current="$1"
+	value="$2"
+	if [ -n "$current" ]; then
+		printf '%s/%s' "$current" "$value"
+	else
+		printf '%s' "$value"
+	fi
+}
+
+join_keys() {
+	text="$1"
+	shift
+	out=""
+	while [ "$#" -gt 0 ]; do
+		value="$(first_field "$text" "$1")"
+		if [ -n "$value" ] && [ "$value" != "0" ]; then
+			out="$(append_value "$out" "$value")"
+		fi
+		shift
+	done
+	printf '%s' "$out"
+}
+
+all_field_values() {
+	text="$1"
+	key="$2"
+	printf '%s' "$text" |
+		tr ',|{}[]' '\n\n\n\n\n\n' |
+		sed -n "s/^[[:space:]]*\"*$key\"*[[:space:]]*[:=][[:space:]\"']*\\([^,\"'|}]*\\).*/\\1/p" |
+		awk 'NF && $1 != "0" { if (out != "") out=out "/" $1; else out=$1 } END { print out }'
+}
+
+min_from_list() {
+	printf '%s' "$1" | tr '/' '\n' |
+		awk 'NF && $1+0==$1 { if (!seen || $1+0 < min) min=$1+0; seen=1 } END { if (seen) print min; else print 0 }'
+}
+
+count_from_list() {
+	printf '%s' "$1" | tr '/' '\n' | awk 'NF { c++ } END { print c+0 }'
+}
+
+max_temp_from_text() {
+	printf '%s' "$1" |
+		tr ',|{}[]' '\n\n\n\n\n\n' |
+		sed -n 's/.*[Tt]emp[^:=]*[:=][^0-9-]*\([0-9][0-9.]*\).*/\1/p' |
+		awk 'BEGIN { max="" } { if (max == "" || $1+0 > max+0) max=$1 } END { if (max == "") print 0; else print max+0 }'
+}
+
+hashrate_from_text() {
+	text="$1"
+	value="$(first_field "$text" "GHS 5s" "GHS av" "GHS RT" "MHS 5s" "MHS av" "MHS RT" "HS RT" "Hash Rate" "hashrate")"
+	num_or_zero "$value"
+}
+
+accepted_from_text() {
+	num_or_zero "$(first_field "$1" "Accepted" "accepted")"
+}
+
+rejected_from_text() {
+	num_or_zero "$(first_field "$1" "Rejected" "rejected" "Stale")"
+}
+
+hw_errors_from_text() {
+	num_or_zero "$(first_field "$1" "Hardware Errors" "Device Hardware%" "HW" "hw_errors")"
+}
+
+fan_rpm_from_text() {
+	text="$1"
+	fans="$(join_keys "$text" "fan1" "fan2" "fan3" "fan4" "fan5" "fan6")"
+	[ -n "$fans" ] || fans="$(join_keys "$text" "Fan Speed In" "Fan Speed Out")"
+	printf '%s' "$fans"
+}
+
+board_temps_from_text() {
+	text="$1"
+	temps="$(join_keys "$text" "temp1" "temp2" "temp3" "temp4" "temp5" "temp6" "temp7" "temp8")"
+	[ -n "$temps" ] || temps="$(all_field_values "$text" "Temperature")"
+	printf '%s' "$temps"
+}
+
+chip_temps_from_text() {
+	text="$1"
+	temps="$(join_keys "$text" "temp2_1" "temp2_2" "temp2_3" "temp2_4" "temp2_5" "temp2_6" "temp2_7" "temp2_8")"
+	[ -n "$temps" ] || temps="$(all_field_values "$text" "Chip Temp Max")"
+	printf '%s' "$temps"
+}
+
+board_hashrates_from_text() {
+	text="$1"
+	rates="$(join_keys "$text" "chain_rate1" "chain_rate2" "chain_rate3" "chain_rate4" "chain_rate5" "chain_rate6" "chain_rate7" "chain_rate8")"
+	[ -n "$rates" ] || rates="$(all_field_values "$text" "MHS av")"
+	printf '%s' "$rates"
+}
+
+board_chips_from_text() {
+	join_keys "$1" "chain_acn1" "chain_acn2" "chain_acn3" "chain_acn4" "chain_acn5" "chain_acn6" "chain_acn7" "chain_acn8"
+}
+
+board_status_from_text() {
+	join_keys "$1" "chain_acs1" "chain_acs2" "chain_acs3" "chain_acs4" "chain_acs5" "chain_acs6" "chain_acs7" "chain_acs8"
+}
+
+board_hw_from_text() {
+	hw="$(join_keys "$1" "chain_hw1" "chain_hw2" "chain_hw3" "chain_hw4" "chain_hw5" "chain_hw6" "chain_hw7" "chain_hw8")"
+	[ -n "$hw" ] || hw="$(all_field_values "$1" "Hardware Errors")"
+	printf '%s' "$hw"
+}
+
+uptime_from_text() {
+	first_field "$1" "Elapsed" "Uptime" "Up Time" "Miner Uptime"
+}
+
+autotune_from_text() {
+	upfreq="$(first_field "$1" "Upfreq Complete" "upfreq_complete")"
+	target_freq="$(first_field "$1" "Target Freq")"
+	freq_avg="$(first_field "$1" "freq_avg")"
+	[ -n "$upfreq" ] || [ -n "$target_freq$freq_avg" ] || return
+	printf 'upfreq=%s target=%s avg=%s' "${upfreq:-n/a}" "${target_freq:-n/a}" "${freq_avg:-n/a}"
+}
+
+pools_from_text() {
+	text="$1"
+	urls="$(all_field_values "$text" "URL")"
+	statuses="$(all_field_values "$text" "Status")"
+	users="$(all_field_values "$text" "User")"
+	[ -n "$urls$statuses$users" ] || return
+	printf 'url=%s status=%s user=%s' "${urls:-n/a}" "${statuses:-n/a}" "${users:-n/a}"
+}
+
+ping_status() {
+	ip="$1"
+	ping -c 1 -W 1 "$ip" 2>/dev/null |
+		awk -F'time=' '/time=/{ split($2,a," "); print "ok " a[1] "ms"; ok=1 } END { if (!ok) print "fail" }'
+}
+
+bad_share_percent() {
+	accepted="$(num_or_zero "$1")"
+	rejected="$(num_or_zero "$2")"
+	awk -v a="$accepted" -v r="$rejected" 'BEGIN { total=a+r; if (total <= 0) print 0; else printf "%.2f", (r*100)/total }'
+}
+
+load_miner_state() {
+	state_file="$1"
+	idle_count=0
+	hot_count=0
+	bad_count=0
+	last_hw=0
+	last_alert=0
+	last_reboot=0
+	last_status="unknown"
+	[ -f "$state_file" ] && . "$state_file" 2>/dev/null
+}
+
+save_miner_state() {
+	state_file="$1"
+	{
+		printf 'idle_count=%s\n' "${idle_count:-0}"
+		printf 'hot_count=%s\n' "${hot_count:-0}"
+		printf 'bad_count=%s\n' "${bad_count:-0}"
+		printf 'last_hw=%s\n' "${hw_errors:-0}"
+		printf 'last_alert=%s\n' "${last_alert:-0}"
+		printf 'last_reboot=%s\n' "${last_reboot:-0}"
+		printf "last_status='%s'\n" "$(printf '%s' "${status:-unknown}" | sed "s/'//g")"
+	} >"$state_file"
+}
+
+telegram_ready() {
+	[ "$(cfg telegram_enabled 0)" = "1" ] && [ -n "$(cfg bot_token)" ]
+}
+
+telegram_enabled() {
+	telegram_ready && [ -n "$(cfg chat_id)" ]
+}
+
+urlencode() {
+	awk '
+	BEGIN {
+		for (i = 0; i < 256; i++) ord[sprintf("%c", i)] = i
+	}
+	{
+		if (NR > 1) printf "%%0A"
+		for (i = 1; i <= length($0); i++) {
+			c = substr($0, i, 1)
+			if (c ~ /[A-Za-z0-9_.~-]/) {
+				printf "%s", c
+			} else if (c == " ") {
+				printf "+"
+			} else {
+				printf "%%%02X", ord[c]
+			}
+		}
+	}
+	'
+}
+
+telegram_send() {
+	text="$1"
+	chat_id="${2:-$(cfg chat_id)}"
+	telegram_ready || return 0
+	[ -n "$chat_id" ] || return 0
+	token="$(cfg bot_token)"
+	encoded="$(printf '%s' "$text" | urlencode)"
+	wget -qO- --post-data="chat_id=$chat_id&text=$encoded" "https://api.telegram.org/bot$token/sendMessage" >/dev/null 2>&1 || log "telegram send failed"
+}
+
+telegram_send_markup() {
+	text="$1"
+	markup="$2"
+	chat_id="${3:-$(cfg chat_id)}"
+	telegram_ready || return 0
+	[ -n "$chat_id" ] || return 0
+	token="$(cfg bot_token)"
+	encoded_text="$(printf '%s' "$text" | urlencode)"
+	encoded_markup="$(printf '%s' "$markup" | urlencode)"
+	resp="$(wget -qO- --post-data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+		log "telegram send markup failed"
+		return 1
+	}
+	case "$resp" in
+		*'"ok":true'*) return 0 ;;
+		*) log "telegram send markup rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
+	esac
+	return 1
+}
+
+telegram_answer_callback() {
+	callback_id="$1"
+	text="$2"
+	telegram_ready || return 0
+	[ -n "$callback_id" ] || return 0
+	token="$(cfg bot_token)"
+	encoded_text="$(printf '%s' "$text" | urlencode)"
+	wget -qO- --post-data="callback_query_id=$callback_id&text=$encoded_text" "https://api.telegram.org/bot$token/answerCallbackQuery" >/dev/null 2>&1 || true
+}
+
+status_badge() {
+	case "$1" in
+		Overheat|overheat) echo "[HOT]" ;;
+		Idle|idle) echo "[IDLE]" ;;
+		"Fan fault"|fan_fault) echo "[FAN]" ;;
+		"Bad shares"|bad_shares) echo "[SHARES]" ;;
+		"API down"|api_down) echo "[DOWN]" ;;
+		RECOVERED|ok|OK) echo "[OK]" ;;
+		AUTO-REBOOT) echo "[REBOOT]" ;;
+		*) echo "[INFO]" ;;
+	esac
+}
+
+status_key() {
+	case "$1" in
+		Overheat|overheat) echo "overheat" ;;
+		Idle|idle) echo "idle" ;;
+		"Fan fault"|fan_fault) echo "fan_fault" ;;
+		"Bad shares"|bad_shares) echo "bad_shares" ;;
+		"API down"|api_down) echo "api_down" ;;
+		RECOVERED|ok|OK) echo "ok" ;;
+		AUTO-REBOOT) echo "auto_reboot" ;;
+		*) printf '%s' "$1" | tr 'A-Z ' 'a-z_' ;;
+	esac
+}
+
+notify_event() {
+	name="$1"
+	ip="$2"
+	status_text="$3"
+	detail="$4"
+	current="$(now)"
+	event_key="$(status_key "$status_text")"
+	cooldown="$(cfg alert_cooldown 3600)"
+	if [ "$event_key" != "${last_status:-unknown}" ] || [ $((current - ${last_alert:-0})) -ge "$cooldown" ]; then
+		badge="$(status_badge "$status_text")"
+		display_status="$(telegram_status_label "$status_text")"
+		msg="$(cfg router_label "OpenWrt ASIC Watchdog")
+$badge $name ($ip)
+Статус: $display_status
+$detail"
+		telegram_send "$msg"
+		log "$name $ip $status_text $detail"
+		last_alert="$current"
+	fi
+}
+
+reboot_miner_section() {
+	sec="$1"
+	name="$(section_cfg "$sec" name "$sec")"
+	ip="$(section_cfg "$sec" ip)"
+	port="$(section_cfg "$sec" api_port 4028)"
+	model="$(section_cfg "$sec" model generic)"
+	method="$(section_cfg "$sec" reboot_method "")"
+	user="$(section_cfg "$sec" user root)"
+	password="$(section_cfg "$sec" password root)"
+
+	[ -z "$ip" ] && {
+		printf 'не указан IP для %s\n' "$sec"
+		return 1
+	}
+	[ -z "$method" ] && {
+		case "$model" in
+			antminer) method="antminer_web" ;;
+			*) method="api" ;;
+		esac
+	}
+
+	case "$method" in
+		none)
+			printf 'перезагрузка отключена для %s (%s)\n' "$name" "$ip"
+			return 1
+			;;
+		antminer_web|web)
+			wget -qO- --user="$user" --password="$password" "http://$ip/cgi-bin/reboot.cgi" >/dev/null 2>&1 ||
+				wget -qO- "http://$user:$password@$ip/cgi-bin/reboot.cgi" >/dev/null 2>&1
+			rc=$?
+			;;
+		api)
+			cgminer_cmd "$ip" "$port" "reboot" >/dev/null 2>&1 ||
+				cgminer_cmd "$ip" "$port" "restart" >/dev/null 2>&1
+			rc=$?
+			;;
+		restart)
+			cgminer_cmd "$ip" "$port" "restart" >/dev/null 2>&1
+			rc=$?
+			;;
+		*)
+			printf 'неизвестный метод перезагрузки: %s\n' "$method"
+			return 1
+			;;
+	esac
+
+	if [ "$rc" -eq 0 ]; then
+		printf 'команда отправлена на %s (%s), метод: %s\n' "$name" "$ip" "$method"
+		log "reboot command sent to $name $ip by $method"
+	else
+		printf 'команда не прошла для %s (%s), метод: %s\n' "$name" "$ip" "$method"
+	fi
+	return "$rc"
+}
+
+find_miner_section() {
+	target="$1"
+	for sec in $(miner_sections); do
+		name="$(section_cfg "$sec" name "$sec")"
+		ip="$(section_cfg "$sec" ip)"
+		[ "$target" = "$name" ] || [ "$target" = "$ip" ] || [ "$target" = "$sec" ] || [ "$target" = "${sec#@miner}" ] && {
+			printf '%s' "$sec"
+			return 0
+		}
+	done
+	return 1
+}
+
+reboot_miner() {
+	target="$1"
+	sec="$(find_miner_section "$target")" || {
+		printf 'ASIC не найден: %s\n' "$target"
+		return 1
+	}
+	reboot_miner_section "$sec"
+}
+
+maybe_auto_reboot() {
+	reason="$1"
+	sec="$2"
+	current="$(now)"
+	cooldown="$(cfg reboot_cooldown 1800)"
+	case "$reason" in
+		overheat) [ "$(cfg auto_reboot_on_overheat 0)" = "1" ] || return 0 ;;
+		idle) [ "$(cfg auto_reboot_on_idle 0)" = "1" ] || return 0 ;;
+		bad_shares) [ "$(cfg auto_reboot_on_bad_shares 0)" = "1" ] || return 0 ;;
+		*) return 0 ;;
+	esac
+	[ $((current - ${last_reboot:-0})) -lt "$cooldown" ] && return 0
+	if reboot_miner_section "$sec" >/tmp/asic-watchdog/reboot.out 2>&1; then
+		last_reboot="$current"
+		notify_event "$name" "$ip" "AUTO-REBOOT" "$reason: $(cat /tmp/asic-watchdog/reboot.out)"
+	fi
+}
+
+check_miner() {
+	sec="$1"
+	enabled="$(section_cfg "$sec" enabled 1)"
+	[ "$enabled" = "1" ] || return 0
+
+	name="$(section_cfg "$sec" name "$sec")"
+	ip="$(section_cfg "$sec" ip)"
+	model="$(section_cfg "$sec" model generic)"
+	port="$(section_cfg "$sec" api_port 4028)"
+	max_temp="$(section_cfg "$sec" max_temp "$(cfg max_temp 85)")"
+	min_hashrate="$(section_cfg "$sec" min_hashrate "$(cfg min_hashrate 1)")"
+	fail_cycles="$(cfg fail_cycles 2)"
+	state_file="$RUNDIR/miner-$(safe_id "$name-$ip").state"
+	load_miner_state "$state_file"
+
+	status="ok"
+	reason="OK"
+	detail=""
+	temp=0
+	hashrate=0
+	accepted=0
+	rejected=0
+	hw_errors=0
+	bad_pct=0
+	api_ok=0
+	fan_rpm=""
+	fan_min=0
+	fan_count=0
+	board_temps=""
+	chip_temps=""
+	board_hashrates=""
+	board_chips=""
+	board_status=""
+	board_hw=""
+	uptime=""
+	pools=""
+	autotune=""
+	ping=""
+
+	if [ -z "$ip" ]; then
+		status="config_error"
+		reason="No IP"
+	else
+		summary="$(cgminer_cmd "$ip" "$port" "summary")"
+		stats="$(cgminer_cmd "$ip" "$port" "stats")"
+		devs="$(cgminer_cmd "$ip" "$port" "devs")"
+		pools_raw="$(cgminer_cmd "$ip" "$port" "pools")"
+		raw="$summary
+$stats
+$devs
+$pools_raw"
+		if [ -n "$summary$stats" ]; then
+			api_ok=1
+			temp="$(max_temp_from_text "$raw")"
+			hashrate="$(hashrate_from_text "$raw")"
+			accepted="$(accepted_from_text "$raw")"
+			rejected="$(rejected_from_text "$raw")"
+			hw_errors="$(hw_errors_from_text "$raw")"
+			fan_rpm="$(fan_rpm_from_text "$raw")"
+			fan_min="$(min_from_list "$fan_rpm")"
+			fan_count="$(count_from_list "$fan_rpm")"
+			board_temps="$(board_temps_from_text "$raw")"
+			chip_temps="$(chip_temps_from_text "$raw")"
+			board_hashrates="$(board_hashrates_from_text "$raw")"
+			board_chips="$(board_chips_from_text "$raw")"
+			board_status="$(board_status_from_text "$raw")"
+			board_hw="$(board_hw_from_text "$raw")"
+			uptime="$(uptime_from_text "$raw")"
+			pools="$(pools_from_text "$raw")"
+			autotune="$(autotune_from_text "$raw")"
+			ping="$(ping_status "$ip")"
+			bad_pct="$(bad_share_percent "$accepted" "$rejected")"
+			hw_delta="$(awk -v a="$(num_or_zero "$hw_errors")" -v b="$(num_or_zero "${last_hw:-0}")" 'BEGIN { d=a-b; if (d < 0) d=0; print d }')"
+
+			if ge_num "$temp" "$max_temp" && gt_num "$temp" 0; then hot_count=$((hot_count + 1)); else hot_count=0; fi
+			if gt_num "$min_hashrate" 0 && ge_num "$min_hashrate" "$hashrate"; then idle_count=$((idle_count + 1)); else idle_count=0; fi
+			if pct_gt "$bad_pct" "$(cfg bad_share_percent 3)" || ge_num "$hw_delta" "$(cfg max_hw_errors_delta 100)"; then bad_count=$((bad_count + 1)); else bad_count=0; fi
+
+			if gt_num "$fan_count" 0 && gt_num "$(cfg min_fan_rpm 1000)" "$fan_min"; then
+				status="fan_fault"
+				reason="Fan fault"
+				detail="fan_min=${fan_min}rpm limit=$(cfg min_fan_rpm 1000)rpm fans=${fan_rpm} temp=${temp}C hash=${hashrate}"
+				notify_event "$name" "$ip" "$reason" "$detail"
+			elif [ "$hot_count" -ge "$fail_cycles" ]; then
+				status="overheat"
+				reason="Overheat"
+				detail="temp=${temp}C limit=${max_temp}C hash=${hashrate} accepted=${accepted} rejected=${rejected} bad=${bad_pct}% hw_delta=${hw_delta}"
+				notify_event "$name" "$ip" "$reason" "$detail"
+				maybe_auto_reboot overheat "$sec"
+			elif [ "$idle_count" -ge "$fail_cycles" ]; then
+				status="idle"
+				reason="Idle"
+				detail="hash=${hashrate} min=${min_hashrate} temp=${temp}C accepted=${accepted} rejected=${rejected} bad=${bad_pct}%"
+				notify_event "$name" "$ip" "$reason" "$detail"
+				maybe_auto_reboot idle "$sec"
+			elif [ "$bad_count" -ge "$fail_cycles" ]; then
+				status="bad_shares"
+				reason="Bad shares"
+				detail="accepted=${accepted} rejected=${rejected} bad=${bad_pct}% hw=${hw_errors} hw_delta=${hw_delta} hash=${hashrate}"
+				notify_event "$name" "$ip" "$reason" "$detail"
+				maybe_auto_reboot bad_shares "$sec"
+			else
+				status="ok"
+				reason="OK"
+				detail="hash=${hashrate} temp=${temp}C accepted=${accepted} rejected=${rejected} bad=${bad_pct}% hw=${hw_errors}"
+				if [ "${last_status:-unknown}" != "ok" ] && [ "${last_status:-unknown}" != "unknown" ]; then
+					notify_event "$name" "$ip" "RECOVERED" "$detail"
+				fi
+			fi
+		else
+			status="api_down"
+			reason="API down"
+			ping="$(ping_status "$ip")"
+			detail="no answer from $ip:$port ping=$ping"
+			notify_event "$name" "$ip" "$reason" "$detail"
+		fi
+	fi
+
+	save_miner_state "$state_file"
+
+	[ "$JSON_FIRST" = "0" ] && printf ',' >>"$STATUS_TMP"
+	JSON_FIRST=0
+	{
+		printf '{'
+		jfield section "$sec"; printf ','
+		jfield name "$name"; printf ','
+		jfield ip "$ip"; printf ','
+		jfield model "$model"; printf ','
+		jfield status "$status"; printf ','
+		jfield reason "$reason"; printf ','
+		jfield detail "$detail"; printf ','
+		jfield api_ok "$api_ok"; printf ','
+		jfield temp "$temp"; printf ','
+		jfield hashrate "$hashrate"; printf ','
+		jfield accepted "$accepted"; printf ','
+		jfield rejected "$rejected"; printf ','
+		jfield bad_pct "$bad_pct"; printf ','
+		jfield hw_errors "$hw_errors"; printf ','
+		jfield fan_rpm "$fan_rpm"; printf ','
+		jfield fan_min "$fan_min"; printf ','
+		jfield fan_count "$fan_count"; printf ','
+		jfield board_temps "$board_temps"; printf ','
+		jfield chip_temps "$chip_temps"; printf ','
+		jfield board_hashrates "$board_hashrates"; printf ','
+		jfield board_chips "$board_chips"; printf ','
+		jfield board_status "$board_status"; printf ','
+		jfield board_hw "$board_hw"; printf ','
+		jfield uptime "$uptime"; printf ','
+		jfield pools "$pools"; printf ','
+		jfield autotune "$autotune"; printf ','
+		jfield ping "$ping"; printf ','
+		jfield idle_count "$idle_count"; printf ','
+		jfield hot_count "$hot_count"; printf ','
+		jfield bad_count "$bad_count"
+		printf '}'
+	} >>"$STATUS_TMP"
+}
+
+write_status_start() {
+	{
+		printf '{'
+		jfield updated "$(date '+%Y-%m-%d %H:%M:%S')"; printf ','
+		jfield interval "$(cfg interval 60)"; printf ','
+		jfield service_enabled "$(cfg enabled 1)"; printf ','
+		jfield telegram "$(telegram_enabled && echo enabled || echo disabled)"; printf ','
+		printf '"miners":['
+	} >"$STATUS_TMP"
+	JSON_FIRST=1
+}
+
+write_status_end() {
+	printf ']}\n' >>"$STATUS_TMP"
+	mv "$STATUS_TMP" "$STATUS_FILE"
+}
+
+run_once() {
+	if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+		old_pid="$(cat "$LOCK_FILE/pid" 2>/dev/null || true)"
+		if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+			log "previous check still running"
+			return 0
+		fi
+		rm -f "$LOCK_FILE/pid" 2>/dev/null || true
+		rmdir "$LOCK_FILE" 2>/dev/null || true
+		if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+			log "previous check still running"
+			return 0
+		fi
+	fi
+	echo "$$" >"$LOCK_FILE/pid"
+	trap 'rm -f "$LOCK_FILE/pid" 2>/dev/null; rmdir "$LOCK_FILE" 2>/dev/null' EXIT INT TERM
+	write_status_start
+	for sec in $(miner_sections); do
+		check_miner "$sec"
+	done
+	write_status_end
+	rm -f "$LOCK_FILE/pid" 2>/dev/null
+	rmdir "$LOCK_FILE" 2>/dev/null
+	trap - EXIT INT TERM
+}
+
+status_json() {
+	if [ -f "$STATUS_FILE" ]; then
+		cat "$STATUS_FILE"
+	else
+		printf '{"updated":"","miners":[]}\n'
+	fi
+}
+
+status_text() {
+	status_json | sed 's/[{}]//g; s/"miners":\[/\n/g; s/},{/}\n{/g; s/"//g; s/,/ /g' | head -n 80
+}
+
+miners_text() {
+	for sec in $(miner_sections); do
+		name="$(section_cfg "$sec" name "$sec")"
+		ip="$(section_cfg "$sec" ip)"
+		model="$(section_cfg "$sec" model generic)"
+		enabled="$(section_cfg "$sec" enabled 1)"
+		printf '%s %s %s enabled=%s\n' "$name" "$ip" "$model" "$enabled"
+	done
+}
+
+status_updated() {
+	status_json | sed -n 's/.*"updated":"\([^"]*\)".*/\1/p'
+}
+
+miner_objects() {
+	status_json |
+		sed 's/^.*"miners":\[//; s/\]}$//' |
+		sed 's/},{/}\n/g; s/^{//; s/}$//'
+}
+
+json_obj_get() {
+	obj="$1"
+	key="$2"
+	printf '%s' "$obj" | awk -v key="$key" '
+	{
+		n = split($0, parts, ",")
+		prefix = "\"" key "\":\""
+		for (i = 1; i <= n; i++) {
+			gsub(/^[[:space:]]*/, "", parts[i])
+			if (index(parts[i], prefix) == 1) {
+				value = substr(parts[i], length(prefix) + 1)
+				sub(/".*/, "", value)
+				print value
+				exit
+			}
+		}
+	}'
+}
+
+miner_obj_by_index() {
+	want="$1"
+	i=0
+	miner_objects | while IFS= read -r obj; do
+		if [ "$i" = "$want" ]; then
+			printf '%s\n' "$obj"
+			break
+		fi
+		i=$((i + 1))
+	done
+}
+
+telegram_status_icon() {
+	case "$1" in
+		ok) printf '🟢' ;;
+		overheat) printf '🔥' ;;
+		fan_fault) printf '🌀' ;;
+		idle) printf '🟡' ;;
+		bad_shares) printf '🟠' ;;
+		api_down) printf '🔴' ;;
+		*) printf '⚠️' ;;
+	esac
+}
+
+telegram_status_label() {
+	case "$1" in
+		ok|OK|RECOVERED) printf 'Норма' ;;
+		overheat|Overheat) printf 'Перегрев' ;;
+		fan_fault|"Fan fault") printf 'Проблема с вентилятором' ;;
+		idle|Idle) printf 'Простой' ;;
+		bad_shares|"Bad shares") printf 'Много битых шар' ;;
+		api_down|"API down") printf 'Нет связи с API' ;;
+		AUTO-REBOOT) printf 'Автоперезагрузка' ;;
+		"No IP") printf 'Не указан IP' ;;
+		*) printf 'Внимание' ;;
+	esac
+}
+
+button_status_text() {
+	case "$1" in
+		ok) printf 'ОК' ;;
+		overheat) printf 'ЖАРА' ;;
+		fan_fault) printf 'ВЕНТ' ;;
+		idle) printf 'СТОП' ;;
+		bad_shares) printf 'ШАРЫ' ;;
+		api_down) printf 'СВЯЗЬ' ;;
+		*) printf 'ВНИМ' ;;
+	esac
+}
+
+format_hashrate() {
+	raw="$1"
+	awk -v h="$raw" '
+	BEGIN {
+		h += 0
+		if (h <= 0) printf "нет данных"
+		else if (h >= 1000000) printf "%.1f TH/s", h / 1000000
+		else if (h >= 1000) printf "%.1f TH/s", h / 1000
+		else printf "%.1f GH/s", h
+	}'
+}
+
+format_temp() {
+	awk -v t="$(num_or_zero "$1")" 'BEGIN { if (t > 0) printf "%.1f°C", t; else printf "нет данных" }'
+}
+
+format_fan() {
+	fan="$1"
+	if [ -n "$fan" ] && [ "$fan" != "0" ]; then
+		printf '%srpm' "$fan"
+	else
+		printf 'нет данных'
+	fi
+}
+
+hash_spread_percent() {
+	printf '%s' "$1" | tr '/' '\n' |
+		awk 'NF && $1+0==$1 && $1+0 > 0 {
+			v=$1+0
+			if (!seen || v < min) min=v
+			if (!seen || v > max) max=v
+			seen=1
+		}
+		END {
+			if (!seen || max <= 0) print 0
+			else printf "%.1f", ((max-min)*100)/max
+		}'
+}
+
+nonzero_list_count() {
+	printf '%s' "$1" | tr '/' '\n' | awk 'NF && $1+0 > 0 { c++ } END { print c+0 }'
+}
+
+miner_recommendations() {
+	obj="$1"
+	status="$(json_obj_get "$obj" status)"
+	temp="$(json_obj_get "$obj" temp)"
+	bad_pct="$(json_obj_get "$obj" bad_pct)"
+	fan_min="$(json_obj_get "$obj" fan_min)"
+	fan_count="$(json_obj_get "$obj" fan_count)"
+	hw_errors="$(json_obj_get "$obj" hw_errors)"
+	board_hw="$(json_obj_get "$obj" board_hw)"
+	board_hashrates="$(json_obj_get "$obj" board_hashrates)"
+	pools="$(json_obj_get "$obj" pools)"
+	section="$(json_obj_get "$obj" section)"
+	max_temp="$(section_cfg "$section" max_temp "$(cfg max_temp 85)")"
+	min_fan="$(cfg min_fan_rpm 1000)"
+	bad_limit="$(cfg bad_share_percent 3)"
+	spread="$(hash_spread_percent "$board_hashrates")"
+	board_hw_bad="$(nonzero_list_count "$board_hw")"
+	notes=""
+
+	if [ "$status" = "api_down" ]; then
+		notes="$notes
+- Нет API: проверь питание, сеть, IP и порт 4028."
+	fi
+	if gt_num "$temp" "$max_temp" || [ "$status" = "overheat" ]; then
+		notes="$notes
+- Перегрев: temp=${temp}C, лимит=${max_temp}C. Проверь продув, пыль, температуру помещения и режим разгона."
+	fi
+	if gt_num "$fan_count" 0 && gt_num "$min_fan" "$fan_min"; then
+		notes="$notes
+- Вентилятор: минимум ${fan_min}rpm ниже лимита ${min_fan}rpm. Проверь fan/разъём/питание."
+	fi
+	if gt_num "$bad_pct" "$bad_limit"; then
+		notes="$notes
+- Битые шары: ${bad_pct}% выше лимита ${bad_limit}%. Проверь пул, сеть, частоты и стабильность плат."
+	fi
+	if gt_num "$hw_errors" 0 || gt_num "$board_hw_bad" 0; then
+		notes="$notes
+- HW ошибки: есть ошибки по платам. Проверь конкретную плату, питание, частоты и охлаждение."
+	fi
+	if gt_num "$spread" 20; then
+		notes="$notes
+- Разброс хешрейта по платам: ${spread}%. Возможна просадка одной платы или перегрев."
+	fi
+	printf '%s' "$pools" | grep -Eiq 'dead|fail|offline' && notes="$notes
+- Пул: есть признаки Dead/Fail/Offline. Проверь pool URL, DNS и сеть."
+
+	if [ -z "$notes" ]; then
+		echo "- Критичных рекомендаций нет. Наблюдай температуру, rejected и вентиляторы."
+	else
+		printf '%s\n' "$notes"
+	fi
+}
+
+telegram_miner_detail() {
+	idx="$1"
+	obj="$(miner_obj_by_index "$idx")"
+	[ -n "$obj" ] || {
+		echo "ASIC не найден"
+		return 1
+	}
+	name="$(json_obj_get "$obj" name)"
+	ip="$(json_obj_get "$obj" ip)"
+	model="$(json_obj_get "$obj" model)"
+	status="$(json_obj_get "$obj" status)"
+	reason="$(json_obj_get "$obj" reason)"
+	temp="$(json_obj_get "$obj" temp)"
+	hashrate="$(json_obj_get "$obj" hashrate)"
+	accepted="$(json_obj_get "$obj" accepted)"
+	rejected="$(json_obj_get "$obj" rejected)"
+	bad_pct="$(json_obj_get "$obj" bad_pct)"
+	hw_errors="$(json_obj_get "$obj" hw_errors)"
+	fan_rpm="$(json_obj_get "$obj" fan_rpm)"
+	fan_min="$(json_obj_get "$obj" fan_min)"
+	board_temps="$(json_obj_get "$obj" board_temps)"
+	chip_temps="$(json_obj_get "$obj" chip_temps)"
+	board_hashrates="$(json_obj_get "$obj" board_hashrates)"
+	board_chips="$(json_obj_get "$obj" board_chips)"
+	board_status="$(json_obj_get "$obj" board_status)"
+	board_hw="$(json_obj_get "$obj" board_hw)"
+	uptime="$(json_obj_get "$obj" uptime)"
+	pools="$(json_obj_get "$obj" pools)"
+	autotune="$(json_obj_get "$obj" autotune)"
+	ping="$(json_obj_get "$obj" ping)"
+	icon="$(telegram_status_icon "$status")"
+	label="$(telegram_status_label "$status")"
+	reason_label="$(telegram_status_label "$reason")"
+	hash_fmt="$(format_hashrate "$hashrate")"
+	temp_fmt="$(format_temp "$temp")"
+	fan_fmt="$(format_fan "$fan_min")"
+	cat <<EOF
+${icon} ${name}
+${ip} · ${model}
+
+📌 Статус: ${label} (${reason_label})
+⚡ Хешрейт: ${hash_fmt}
+🌡 Температура: ${temp_fmt}
+🌀 Вентиляторы: ${fan_rpm:-нет данных} · мин. ${fan_fmt}
+✅ Accepted: ${accepted:-0}   ❌ Rejected: ${rejected:-0}
+🧮 Битые шары: ${bad_pct}%   HW: ${hw_errors}
+🌐 Сеть/API: ${ping:-нет данных}
+⏱ Аптайм: ${uptime:-нет данных}
+
+Платы и чипы
+🌡 Платы: ${board_temps:-нет данных}
+🔥 Чипы: ${chip_temps:-нет данных}
+⚡ Хеш по платам: ${board_hashrates:-нет данных}
+🧩 Чипы: ${board_chips:-нет данных}
+📋 Состояние: ${board_status:-нет данных}
+🧯 HW по платам: ${board_hw:-нет данных}
+
+Пулы и режим
+🏁 Пулы: ${pools:-нет данных}
+🎛 Автотюн/разгон: ${autotune:-нет данных}
+
+Рекомендации
+$(miner_recommendations "$obj")
+EOF
+}
+
+telegram_status_menu() {
+	chat_id="$1"
+	updated="$(status_updated)"
+	menu_file="$RUNDIR/tg-menu-$$.miners"
+	miner_objects >"$menu_file"
+	body=""
+	total=0
+	ok_count=0
+	issue_count=0
+	down_count=0
+	hot_count=0
+	fan_fault_count=0
+	max_seen=0
+	min_fan_seen=0
+	markup='{"inline_keyboard":[[{"text":"🔄 Обновить","callback_data":"refresh"}]'
+	i=0
+	while IFS= read -r obj; do
+		name="$(json_obj_get "$obj" name)"
+		ip="$(json_obj_get "$obj" ip)"
+		status="$(json_obj_get "$obj" status)"
+		temp="$(json_obj_get "$obj" temp)"
+		hashrate="$(json_obj_get "$obj" hashrate)"
+		bad_pct="$(json_obj_get "$obj" bad_pct)"
+		fan_min="$(json_obj_get "$obj" fan_min)"
+		icon="$(telegram_status_icon "$status")"
+		label="$(telegram_status_label "$status")"
+		short="$(button_status_text "$status")"
+		hash_fmt="$(format_hashrate "$hashrate")"
+		temp_fmt="$(format_temp "$temp")"
+		fan_fmt="$(format_fan "$fan_min")"
+		total=$((total + 1))
+		case "$status" in
+			ok) ok_count=$((ok_count + 1)) ;;
+			api_down) issue_count=$((issue_count + 1)); down_count=$((down_count + 1)) ;;
+			overheat) issue_count=$((issue_count + 1)); hot_count=$((hot_count + 1)) ;;
+			fan_fault) issue_count=$((issue_count + 1)); fan_fault_count=$((fan_fault_count + 1)) ;;
+			*) issue_count=$((issue_count + 1)) ;;
+		esac
+		if gt_num "$temp" "$max_seen"; then max_seen="$temp"; fi
+		if [ "$fan_min" != "0" ] && { [ "$min_fan_seen" = "0" ] || gt_num "$min_fan_seen" "$fan_min"; }; then min_fan_seen="$fan_min"; fi
+		body="${body}${icon} ${name}
+   ${label} · ${ip}
+   ⚡ ${hash_fmt}   🌡 ${temp_fmt}   🌀 ${fan_fmt}   ❌ ${bad_pct}%
+"
+		btn_text="$(printf 'ℹ️ %s %s' "$short" "$name" | json_escape)"
+		reboot_text="$(printf '🔁 Перезагрузка %s' "$name" | json_escape)"
+		markup="${markup},[{\"text\":\"$btn_text\",\"callback_data\":\"detail:$i\"},{\"text\":\"$reboot_text\",\"callback_data\":\"reboot:$i\"}]"
+		i=$((i + 1))
+	done <"$menu_file"
+	rm -f "$menu_file"
+	markup="${markup}]}"
+	max_temp_fmt="$(format_temp "$max_seen")"
+	min_fan_fmt="$(format_fan "$min_fan_seen")"
+	text="📊 Мониторинг ASIC
+🕘 ${updated:-unknown}
+
+🟢 В норме: ${ok_count}/${total}   🔴 Проблемы: ${issue_count}
+🔥 Перегрев: ${hot_count}   🌀 Вентилятор: ${fan_fault_count}   🌐 Нет связи: ${down_count}
+🌡 Макс. температура: ${max_temp_fmt}   🌀 Мин. вентилятор: ${min_fan_fmt}
+
+${body}
+Нажми ℹ️ для подробностей или 🔁 для перезагрузки с подтверждением."
+	telegram_send_markup "$text" "$markup" "$chat_id"
+}
+
+telegram_handle_callback() {
+	chat_id="$1"
+	data="$2"
+	callback_id="$3"
+	allowed="$(cfg chat_id)"
+	[ "$chat_id" = "$allowed" ] || {
+		telegram_answer_callback "$callback_id" "Нет доступа"
+		return 0
+	}
+	case "$data" in
+		refresh)
+			telegram_answer_callback "$callback_id" "Обновляю..."
+			run_once
+			telegram_status_menu "$chat_id"
+			;;
+		detail:*)
+			idx="${data#detail:}"
+			telegram_answer_callback "$callback_id" "Открываю детали"
+			markup="{\"inline_keyboard\":[[{\"text\":\"🔄 Обновить список\",\"callback_data\":\"refresh\"},{\"text\":\"🔁 Перезагрузка\",\"callback_data\":\"reboot:$idx\"}]]}"
+			telegram_send_markup "$(telegram_miner_detail "$idx")" "$markup" "$chat_id"
+			;;
+		reboot:*)
+			idx="${data#reboot:}"
+			obj="$(miner_obj_by_index "$idx")"
+			if [ -z "$obj" ]; then
+				telegram_answer_callback "$callback_id" "ASIC не найден"
+				return 0
+			fi
+			name="$(json_obj_get "$obj" name)"
+			ip="$(json_obj_get "$obj" ip)"
+			telegram_answer_callback "$callback_id" "Подтверди перезагрузку"
+			markup="{\"inline_keyboard\":[[{\"text\":\"✅ Да, перезагрузить\",\"callback_data\":\"confirm_reboot:$idx\"},{\"text\":\"✖️ Отмена\",\"callback_data\":\"cancel\"}]]}"
+			telegram_send_markup "🔁 Перезагрузить $name ($ip)?" "$markup" "$chat_id"
+			;;
+		confirm_reboot:*)
+			idx="${data#confirm_reboot:}"
+			obj="$(miner_obj_by_index "$idx")"
+			if [ -z "$obj" ]; then
+				telegram_answer_callback "$callback_id" "ASIC не найден"
+				return 0
+			fi
+			name="$(json_obj_get "$obj" name)"
+			ip="$(json_obj_get "$obj" ip)"
+			section="$(json_obj_get "$obj" section)"
+			target="${section:-$name}"
+			telegram_answer_callback "$callback_id" "Отправляю команду..."
+			out="$(reboot_miner "$target" 2>&1)"
+			rc=$?
+			if [ "$rc" -eq 0 ]; then
+				telegram_send "✅ Команда перезагрузки отправлена: $name ($ip)
+$out" "$chat_id"
+			else
+				telegram_send "❌ Не удалось перезагрузить $name ($ip)
+$out" "$chat_id"
+			fi
+			;;
+		cancel)
+			telegram_answer_callback "$callback_id" "Отменено"
+			;;
+	esac
+}
+
+telegram_handle_command() {
+	chat_id="$1"
+	text="$2"
+	allowed="$(cfg chat_id)"
+	cmd="$(printf '%s' "$text" | awk '{ print $1 }')"
+	cmd_base="$(printf '%s' "$cmd" | sed 's#^\\*/*##; s#@.*##; s#[^A-Za-z0-9_-].*$##')"
+	args="$(printf '%s' "$text" | sed 's/^[^ ][^ ]*[ ]*//')"
+
+	case "$cmd_base" in
+		chatid)
+			telegram_send "Chat ID: $chat_id
+Укажи это значение в LuCI -> Services -> ASIC Watchdog -> Chat / Group ID." "$chat_id"
+			return 0
+			;;
+	esac
+
+	[ "$chat_id" = "$allowed" ] || {
+		log "telegram command ignored chat=$chat_id allowed=$allowed cmd=$cmd_base"
+		return 0
+	}
+	log "telegram command chat=$chat_id cmd=$cmd_base"
+
+	case "$cmd_base" in
+		status)
+			telegram_status_menu "$chat_id"
+			;;
+		miners)
+			telegram_status_menu "$chat_id"
+			;;
+		reboot)
+			target="$args"
+			if [ -n "$target" ]; then
+				out="$(reboot_miner "$target" 2>&1)"
+				telegram_send "$out" "$chat_id"
+			else
+				telegram_send "Формат: /reboot имя_или_ip" "$chat_id"
+			fi
+			;;
+		help|start)
+			telegram_send "/status - мониторинг с кнопками
+/miners - тот же список ASIC
+/reboot имя_или_ip - перезагрузка вручную
+/chatid - показать ID этой группы" "$chat_id"
+			;;
+	esac
+}
+
+telegram_poll() {
+	telegram_ready || return 0
+	token="$(cfg bot_token)"
+	offset="$(cat "$TG_OFFSET_FILE" 2>/dev/null || echo 0)"
+	url="https://api.telegram.org/bot$token/getUpdates?timeout=1&offset=$offset"
+	json="$(wget -qO- "$url" 2>/dev/null)" || return 0
+	[ -n "$json" ] || return 0
+
+	printf '%s' "$json" | sed 's/},{"update_id"/}\n{"update_id"/g' | while IFS= read -r item; do
+		update_id="$(printf '%s' "$item" | sed -n 's/.*"update_id":\([0-9][0-9]*\).*/\1/p')"
+		chat_id="$(printf '%s' "$item" | sed -n 's/.*"chat":{"id":\(-*[0-9][0-9]*\).*/\1/p')"
+		text="$(printf '%s' "$item" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
+		callback_id="$(printf '%s' "$item" | sed -n 's/.*"callback_query":{"id":"\([^"]*\)".*/\1/p')"
+		callback_data="$(printf '%s' "$item" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+		[ -n "$update_id" ] && echo $((update_id + 1)) >"$TG_OFFSET_FILE"
+		[ -n "$chat_id" ] && [ -n "$callback_data" ] && telegram_handle_callback "$chat_id" "$callback_data" "$callback_id"
+		[ -n "$chat_id" ] && [ -n "$text" ] && telegram_handle_command "$chat_id" "$text"
+	done
+}
+
+daemon() {
+	log "daemon started"
+	last_check=0
+	while true; do
+		if [ "$(cfg enabled 1)" = "1" ]; then
+			telegram_poll
+			current="$(now)"
+			interval="$(cfg interval 60)"
+			if [ $((current - last_check)) -ge "$interval" ]; then
+				run_once
+				last_check="$current"
+			fi
+		fi
+		sleep "$(cfg telegram_poll_interval 5)"
+	done
+}
+
+case "${1:-status-json}" in
+	daemon) daemon ;;
+	run-once) run_once ;;
+	status-json) status_json ;;
+	status-text) status_text ;;
+	miners) miners_text ;;
+	telegram-test) telegram_send "[TEST] ASIC Watchdog Telegram delivery check
+Router: $(cfg router_label "OpenWrt ASIC Watchdog")
+Chat: $(cfg chat_id)"; echo "telegram test sent to $(cfg chat_id)" ;;
+	telegram-menu) run_once; telegram_status_menu "$(cfg chat_id)"; echo "telegram menu sent to $(cfg chat_id)" ;;
+	telegram-poll) telegram_poll; echo "telegram poll done" ;;
+	reboot) shift; reboot_miner "$1" ;;
+	*) echo "Использование: $0 daemon|run-once|status-json|status-text|miners|telegram-test|telegram-menu|telegram-poll|reboot <имя|ip>" >&2; exit 1 ;;
+esac

@@ -1,0 +1,454 @@
+'use strict';
+'require view';
+'require fs';
+'require ui';
+'require poll';
+
+var helper = '/usr/libexec/asic-watchdog-luci';
+
+function run(action, args) {
+	return fs.exec(helper, [ action ].concat(args || []));
+}
+
+function parse(res) {
+	try {
+		return JSON.parse((res && res.stdout) || '{}');
+	} catch (e) {
+		return { ok: false, error: 'Bad helper JSON', raw: (res && res.stdout) || '', stderr: (res && res.stderr) || '' };
+	}
+}
+
+function opt(value, text) {
+	return E('option', { value: value }, text);
+}
+
+function field(label, node) {
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', { 'class': 'cbi-value-title' }, label),
+		E('div', { 'class': 'cbi-value-field' }, node)
+	]);
+}
+
+function input(name, value, type) {
+	return E('input', { 'name': name, 'value': value || '', 'type': type || 'text', 'class': 'cbi-input-text' });
+}
+
+function select(name, value, options) {
+	var s = E('select', { 'name': name, 'class': 'cbi-input-select' }, options);
+	s.value = value || '';
+	return s;
+}
+
+function formArgs(form) {
+	var fd = new FormData(form);
+	var args = [];
+	fd.forEach(function(value, key) {
+		args.push(key + '=' + value);
+	});
+	return args;
+}
+
+function notifyResult(res) {
+	var data = parse(res);
+	if (data.ok)
+		ui.addNotification(null, E('p', { 'class': 'asic-toast asic-toast-ok' }, [ '✓ ', data.message || 'OK' ]), 'info');
+	else
+		ui.addNotification(null, E('p', { 'class': 'asic-toast asic-toast-bad' }, [ '✕ ', data.error || data.stderr || data.raw || 'Error' ]), 'danger');
+}
+
+function statusMeta(status) {
+	switch (status || 'pending') {
+	case 'ok':
+		return { icon: '✓', label: 'OK', tone: 'ok', title: 'Работает' };
+	case 'overheat':
+		return { icon: '🔥', label: 'HOT', tone: 'hot', title: 'Перегрев' };
+	case 'idle':
+		return { icon: '⏸', label: 'IDLE', tone: 'warn', title: 'Простой' };
+	case 'fan_fault':
+		return { icon: '🌀', label: 'FAN', tone: 'bad', title: 'Вентилятор' };
+	case 'bad_shares':
+		return { icon: '⚠', label: 'SHARES', tone: 'warn', title: 'Битые шары' };
+	case 'api_down':
+		return { icon: '✕', label: 'API', tone: 'bad', title: 'Нет API' };
+	case 'config_error':
+		return { icon: '!', label: 'CFG', tone: 'bad', title: 'Ошибка конфига' };
+	default:
+		return { icon: '…', label: 'WAIT', tone: 'muted', title: 'Ожидание' };
+	}
+}
+
+function badge(status) {
+	var meta = statusMeta(status);
+	return E('span', { 'class': 'asic-badge asic-badge-' + meta.tone, 'title': meta.title }, [
+		E('span', { 'class': 'asic-badge-icon' }, meta.icon),
+		E('span', {}, meta.label)
+	]);
+}
+
+function metric(label, value, unit, tone) {
+	return E('span', { 'class': 'asic-metric asic-metric-' + (tone || 'plain') }, [
+		E('span', { 'class': 'asic-metric-label' }, label),
+		E('span', { 'class': 'asic-metric-value' }, String(value || 0) + (unit || ''))
+	]);
+}
+
+function detail(label, value, tone) {
+	if (value === undefined || value === null || value === '')
+		value = 'n/a';
+	return E('div', { 'class': 'asic-detail asic-detail-' + (tone || 'plain') }, [
+		E('dt', {}, label),
+		E('dd', {}, String(value))
+	]);
+}
+
+function detailGroup(title, items) {
+	return E('section', { 'class': 'asic-detail-group' }, [
+		E('h4', {}, title),
+		E('dl', {}, items)
+	]);
+}
+
+function detailsPanel(s, fanTone, tempTone) {
+	return E('div', { 'class': 'asic-details-panel asic-details-collapsed' }, [
+		detailGroup('Охлаждение', [
+			detail('Вентиляторы', s.fan_rpm, fanTone),
+			detail('Мин. RPM', s.fan_min || 0, fanTone),
+			detail('Темп. плат', s.board_temps, 'plain'),
+			detail('Темп. чипов', s.chip_temps, tempTone)
+		]),
+		detailGroup('Платы', [
+			detail('Хеш по платам', s.board_hashrates, 'plain'),
+			detail('Чипы', s.board_chips, 'plain'),
+			detail('Состояние', s.board_status, 'plain'),
+			detail('HW по платам', s.board_hw, Number(s.hw_errors || 0) > 0 ? 'warn' : 'plain')
+		]),
+		detailGroup('Пулы и сеть', [
+			detail('Пулы', s.pools, 'plain'),
+			detail('Ping', s.ping, s.ping === 'fail' ? 'bad' : 'plain'),
+			detail('Uptime', s.uptime, 'plain')
+		]),
+		detailGroup('Режим', [
+			detail('Autotune', s.autotune, 'plain'),
+			detail('API', s.api_ok === '1' ? 'ok' : 'down', s.api_ok === '1' ? 'plain' : 'bad')
+		])
+	]);
+}
+
+function formatHash(value) {
+	var n = Number(value || 0);
+	if (!isFinite(n))
+		return value || '0';
+	if (n >= 1000000)
+		return (n / 1000000).toFixed(1) + 'T';
+	if (n >= 1000)
+		return (n / 1000).toFixed(1) + 'G';
+	return String(value || 0);
+}
+
+function css() {
+	return E('style', {}, `
+		.asic-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 16px}
+		.asic-card{border-radius:8px;padding:12px;border:1px solid #d8e0e8;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+		.asic-card strong{display:block;font-size:22px;line-height:1.1}
+		.asic-card span{color:#667085;font-size:12px}
+		.asic-card-ok{border-left:5px solid #16a34a}.asic-card-hot{border-left:5px solid #dc2626}.asic-card-warn{border-left:5px solid #f59e0b}.asic-card-bad{border-left:5px solid #7f1d1d}
+		.asic-row-ok{background:linear-gradient(90deg,rgba(22,163,74,.10),transparent 42%)}
+		.asic-row-hot{background:linear-gradient(90deg,rgba(220,38,38,.13),transparent 46%)}
+		.asic-row-warn{background:linear-gradient(90deg,rgba(245,158,11,.15),transparent 46%)}
+		.asic-row-bad{background:linear-gradient(90deg,rgba(127,29,29,.14),transparent 46%)}
+		.asic-row-muted{background:linear-gradient(90deg,rgba(100,116,139,.10),transparent 42%)}
+		.asic-badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 9px;font-weight:700;font-size:12px;letter-spacing:.02em;border:1px solid transparent;white-space:nowrap}
+		.asic-badge-icon{min-width:16px;text-align:center}
+		.asic-badge-ok{color:#166534;background:#dcfce7;border-color:#86efac}
+		.asic-badge-hot{color:#991b1b;background:#fee2e2;border-color:#fca5a5}
+		.asic-badge-warn{color:#92400e;background:#fef3c7;border-color:#fcd34d}
+		.asic-badge-bad{color:#7f1d1d;background:#fecaca;border-color:#f87171}
+		.asic-badge-muted{color:#475569;background:#e2e8f0;border-color:#cbd5e1}
+		.asic-metric{display:inline-flex;align-items:baseline;gap:4px;border-radius:6px;padding:4px 7px;margin:2px 4px 2px 0;background:#f8fafc;border:1px solid #e2e8f0;white-space:nowrap}
+		.asic-metric-label{font-size:11px;color:#64748b;text-transform:uppercase}
+		.asic-metric-value{font-weight:700;color:#0f172a}
+		.asic-metric-hot{background:#fee2e2;border-color:#fca5a5}.asic-metric-hot .asic-metric-value{color:#991b1b}
+		.asic-metric-warn{background:#fef3c7;border-color:#fcd34d}.asic-metric-warn .asic-metric-value{color:#92400e}
+		.asic-metric-strip{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+		.asic-details-toggle{margin-top:6px}
+		.asic-details-panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;max-width:900px}
+		.asic-details-collapsed{display:none}
+		.asic-detail-group{border:1px solid #e2e8f0;border-radius:8px;background:rgba(248,250,252,.86);padding:8px}
+		.asic-detail-group h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;color:#475569;letter-spacing:.04em}
+		.asic-detail-group dl{margin:0;display:grid;grid-template-columns:minmax(92px,130px) minmax(0,1fr);gap:4px 8px}
+		.asic-detail{display:contents}
+		.asic-detail dt{color:#64748b;font-size:12px}
+		.asic-detail dd{margin:0;font-weight:650;color:#0f172a;font-size:12px;word-break:break-word}
+		.asic-detail-bad{background:#fee2e2;border-color:#fca5a5}.asic-detail-warn{background:#fef3c7;border-color:#fcd34d}
+		.asic-name{font-weight:700}.asic-sub{display:block;color:#64748b;font-size:12px;margin-top:2px}
+		.asic-actions{display:flex;gap:6px;flex-wrap:wrap}.asic-actions .btn{margin:0}
+		.asic-edit-hidden{display:none}
+		.asic-form-note{color:#64748b;font-size:12px;margin:4px 0 10px}
+		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd{color:#e5e7eb}.asic-detail-group h4{color:#cbd5e1}}
+		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}}
+		@media (max-width:720px){.asic-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.asic-actions .btn{width:100%;margin-top:4px}}
+	`);
+}
+
+function overview(latest) {
+	var miners = ((latest.status || {}).miners || []);
+	var counts = { ok: 0, hot: 0, warn: 0, bad: 0 };
+	miners.forEach(function(m) {
+		var meta = statusMeta(m.status);
+		if (meta.tone === 'ok')
+			counts.ok++;
+		else if (meta.tone === 'hot')
+			counts.hot++;
+		else if (meta.tone === 'warn')
+			counts.warn++;
+		else
+			counts.bad++;
+	});
+	return E('div', { 'class': 'asic-overview', id: 'asic-overview' }, [
+		E('div', { 'class': 'asic-card asic-card-ok' }, [ E('strong', {}, counts.ok), E('span', {}, '✓ работают') ]),
+		E('div', { 'class': 'asic-card asic-card-hot' }, [ E('strong', {}, counts.hot), E('span', {}, '🔥 перегрев') ]),
+		E('div', { 'class': 'asic-card asic-card-warn' }, [ E('strong', {}, counts.warn), E('span', {}, '⚠ предупреждения') ]),
+		E('div', { 'class': 'asic-card asic-card-bad' }, [ E('strong', {}, counts.bad), E('span', {}, '✕ нет API/ошибка') ])
+	]);
+}
+
+function bySection(status) {
+	var map = {};
+	((status || {}).miners || []).forEach(function(m) {
+		map[m.section] = m;
+	});
+	return map;
+}
+
+return view.extend({
+	load: function() {
+		return L.resolveDefault(run('status'), { stdout: '{}' });
+	},
+
+	render: function(res) {
+		var data = parse(res);
+		var cfg = data.config || {};
+		var status = data.status || {};
+		var state = bySection(status);
+		var detailOpenUntil = {};
+		var detailTtlMs = 10 * 60 * 1000;
+		var viewRoot = E('div', { 'class': 'cbi-map' }, [
+			css(),
+			E('h2', {}, 'ASIC Watchdog'),
+			E('div', { 'class': 'cbi-map-descr' }, 'Лёгкий мониторинг Whatsminer/Antminer с Telegram-уведомлениями и ручной перезагрузкой.')
+		]);
+
+		var statusBox = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, 'Состояние'),
+			E('p', { id: 'asic-updated' }, 'Обновлено: ' + (status.updated || 'ещё нет данных')),
+			overview(data),
+			E('table', { 'class': 'table', id: 'asic-table' }, [
+				E('tr', {}, [
+					E('th', {}, 'Имя'),
+					E('th', {}, 'IP'),
+					E('th', {}, 'Статус'),
+					E('th', {}, 'Метрики'),
+					E('th', {}, '')
+				])
+			])
+		]);
+		viewRoot.appendChild(statusBox);
+
+		var settingsForm = E('form', { 'class': 'cbi-section', id: 'asic-settings' }, [
+			E('h3', {}, 'Настройки'),
+			field('Мониторинг', select('enabled', cfg.enabled || '1', [ opt('1', 'Включен'), opt('0', 'Выключен') ])),
+			field('Интервал, сек', input('interval', cfg.interval || '60')),
+			field('Повтор Telegram тревоги, сек', input('alert_cooldown', cfg.alert_cooldown || '3600')),
+			field('Макс. температура, C', input('max_temp', cfg.max_temp || '85')),
+			field('Мин. хешрейт', input('min_hashrate', cfg.min_hashrate || '1')),
+			field('Rejected shares, %', input('bad_share_percent', cfg.bad_share_percent || '3')),
+			field('HW errors за цикл', input('max_hw_errors_delta', cfg.max_hw_errors_delta || '100')),
+			field('Мин. обороты вентилятора, RPM', input('min_fan_rpm', cfg.min_fan_rpm || '1000')),
+			field('Плохих циклов до тревоги', input('fail_cycles', cfg.fail_cycles || '2')),
+			field('Авто reboot при перегреве', select('auto_reboot_on_overheat', cfg.auto_reboot_on_overheat || '0', [ opt('0', 'Нет'), opt('1', 'Да') ])),
+			field('Авто reboot при простое', select('auto_reboot_on_idle', cfg.auto_reboot_on_idle || '0', [ opt('0', 'Нет'), opt('1', 'Да') ])),
+			field('Авто reboot при bad shares', select('auto_reboot_on_bad_shares', cfg.auto_reboot_on_bad_shares || '0', [ opt('0', 'Нет'), opt('1', 'Да') ])),
+			field('Telegram', select('telegram_enabled', cfg.telegram_enabled || '0', [ opt('0', 'Выключен'), opt('1', 'Включен') ])),
+			field('Bot token', input('bot_token', '', 'password')),
+			field('Chat / Group ID', input('chat_id', cfg.chat_id || '')),
+			E('p', { 'class': 'asic-form-note' }, 'Для группы добавь бота в Telegram-группу и напиши там /chatid. Полученный отрицательный ID вставь в Chat / Group ID. Команды в группе можно писать как /status или /status@имя_бота.'),
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', { 'class': 'btn cbi-button cbi-button-save', 'type': 'submit' }, 'Сохранить'),
+				E('button', { 'class': 'btn cbi-button', 'type': 'button', id: 'asic-run-once' }, 'Проверить сейчас'),
+				E('button', { 'class': 'btn cbi-button', 'type': 'button', id: 'asic-telegram-test' }, 'Тест в Telegram'),
+				E('button', { 'class': 'btn cbi-button', 'type': 'button', id: 'asic-restart' }, 'Рестарт сервиса')
+			])
+		]);
+		viewRoot.appendChild(settingsForm);
+
+		var addForm = E('form', { 'class': 'cbi-section', id: 'asic-add' }, [
+			E('h3', {}, 'Добавить ASIC'),
+			field('Имя', input('name', '')),
+			field('IP', input('ip', '')),
+			field('Модель', select('model', 'whatsminer', [ opt('whatsminer', 'Whatsminer'), opt('antminer', 'Antminer'), opt('generic', 'Generic API') ])),
+			field('API port', input('api_port', '4028')),
+			field('Reboot method', select('reboot_method', 'api', [ opt('api', 'API 4028'), opt('antminer_web', 'Antminer web'), opt('restart', 'CGMiner restart'), opt('none', 'Нет') ])),
+			field('Инд. макс. температура, C', input('max_temp', '')),
+			field('Инд. мин. хешрейт', input('min_hashrate', '')),
+			field('Web user', input('user', 'root')),
+			field('Web password', input('password', 'root', 'password')),
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', { 'class': 'btn cbi-button cbi-button-add', 'type': 'submit' }, 'Добавить')
+			])
+		]);
+		viewRoot.appendChild(addForm);
+
+		var editForm = E('form', { 'class': 'cbi-section asic-edit-hidden', id: 'asic-edit' }, [
+			E('h3', {}, 'Редактировать ASIC'),
+			E('p', { 'class': 'asic-form-note' }, 'Пароль можно оставить пустым, тогда сохранится текущий. Индивидуальные лимиты пустыми наследуют общие настройки.'),
+			E('input', { 'type': 'hidden', 'name': 'section' }),
+			field('Включен', select('enabled', '1', [ opt('1', 'Да'), opt('0', 'Нет') ])),
+			field('Имя', input('name', '')),
+			field('IP', input('ip', '')),
+			field('Модель', select('model', 'whatsminer', [ opt('whatsminer', 'Whatsminer'), opt('antminer', 'Antminer'), opt('generic', 'Generic API') ])),
+			field('API port', input('api_port', '4028')),
+			field('Reboot method', select('reboot_method', 'api', [ opt('api', 'API 4028'), opt('antminer_web', 'Antminer web'), opt('restart', 'CGMiner restart'), opt('none', 'Нет') ])),
+			field('Инд. макс. температура, C', input('max_temp', '')),
+			field('Инд. мин. хешрейт', input('min_hashrate', '')),
+			field('Web user', input('user', 'root')),
+			field('Новый web password', input('password', '', 'password')),
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', { 'class': 'btn cbi-button cbi-button-save', 'type': 'submit' }, 'Сохранить ASIC'),
+				E('button', { 'class': 'btn cbi-button', 'type': 'button', id: 'asic-edit-cancel' }, 'Отмена')
+			])
+		]);
+		viewRoot.appendChild(editForm);
+
+		function fillEditForm(m) {
+			editForm.classList.remove('asic-edit-hidden');
+			editForm.elements.section.value = m.section || '';
+			editForm.elements.enabled.value = m.enabled || '1';
+			editForm.elements.name.value = m.name || '';
+			editForm.elements.ip.value = m.ip || '';
+			editForm.elements.model.value = m.model || 'generic';
+			editForm.elements.api_port.value = m.api_port || '4028';
+			editForm.elements.reboot_method.value = m.reboot_method || 'api';
+			editForm.elements.max_temp.value = m.max_temp || '';
+			editForm.elements.min_hashrate.value = m.min_hashrate || '';
+			editForm.elements.user.value = m.user || 'root';
+			editForm.elements.password.value = '';
+			editForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		}
+
+		function renderRows(latest) {
+			var table = viewRoot.querySelector('#asic-table');
+			while (table.rows.length > 1)
+				table.deleteRow(1);
+			var nowMs = Date.now();
+			Object.keys(detailOpenUntil).forEach(function(key) {
+				if (detailOpenUntil[key] <= nowMs)
+					delete detailOpenUntil[key];
+			});
+			var overviewNode = viewRoot.querySelector('#asic-overview');
+			if (overviewNode)
+				overviewNode.replaceWith(overview(latest));
+			var cfgNow = (latest.config || {}).miners || [];
+			var stateNow = bySection(latest.status || {});
+			cfgNow.forEach(function(m) {
+				var s = stateNow[m.section] || {};
+				var meta = statusMeta(s.status);
+				var tempTone = meta.tone === 'hot' ? 'hot' : (Number(s.temp || 0) >= 80 ? 'warn' : 'plain');
+				var badTone = Number(s.bad_pct || 0) >= 3 ? 'warn' : 'plain';
+				var fanTone = Number(s.fan_min || 0) > 0 && Number(s.fan_min || 0) < Number((latest.config || {}).min_fan_rpm || 1000) ? 'bad' : 'plain';
+				var detailKey = m.section || m.ip || m.name;
+				var isOpen = detailOpenUntil[detailKey] > nowMs;
+				var panel = detailsPanel(s, fanTone, tempTone);
+				if (isOpen)
+					panel.classList.remove('asic-details-collapsed');
+				table.appendChild(E('tr', { 'class': 'asic-row-' + meta.tone }, [
+					E('td', {}, [ E('span', { 'class': 'asic-name' }, m.name || m.section), E('span', { 'class': 'asic-sub' }, (m.model || '') + ' · ' + (m.reboot_method || '')) ]),
+					E('td', {}, m.ip || ''),
+					E('td', {}, [ badge(s.status || 'pending'), E('br'), E('small', {}, s.reason || '') ]),
+					E('td', {}, [
+						E('div', { 'class': 'asic-metric-strip' }, [
+							metric('hash', formatHash(s.hashrate), '', 'plain'),
+							metric('temp', s.temp || 0, 'C', tempTone),
+							metric('fan', s.fan_min || 0, 'rpm', fanTone),
+							metric('bad', s.bad_pct || 0, '%', badTone),
+							metric('HW', s.hw_errors || 0, '', Number(s.hw_errors || 0) > 0 ? 'warn' : 'plain')
+						]),
+						E('button', { 'class': 'btn cbi-button asic-details-toggle', 'click': function(ev) {
+							var collapsed = panel.classList.toggle('asic-details-collapsed');
+							if (collapsed)
+								delete detailOpenUntil[detailKey];
+							else
+								detailOpenUntil[detailKey] = Date.now() + detailTtlMs;
+							ev.target.textContent = collapsed ? '▾ Детали' : '▴ Скрыть';
+						} }, isOpen ? '▴ Скрыть' : '▾ Детали'),
+						panel
+					]),
+					E('td', { 'class': 'asic-actions' }, [
+						E('button', { 'class': 'btn cbi-button', 'click': function() {
+							fillEditForm(m);
+						} }, '✎ Изменить'),
+						' ',
+						E('button', { 'class': 'btn cbi-button', 'click': function() {
+							return run('reboot_miner', [ 'target=' + (m.name || m.ip) ]).then(notifyResult).then(refresh);
+						} }, '↻ Reboot'),
+						' ',
+						E('button', { 'class': 'btn cbi-button-negative', 'click': function() {
+							if (!confirm('Удалить ASIC из мониторинга?'))
+								return;
+							return run('delete_miner', [ 'section=' + m.section ]).then(notifyResult).then(refresh);
+						} }, '✕ Удалить')
+					])
+				]));
+			});
+			viewRoot.querySelector('#asic-updated').textContent = 'Обновлено: ' + ((latest.status || {}).updated || 'ещё нет данных');
+		}
+
+		function refresh() {
+			return run('status').then(function(newRes) {
+				renderRows(parse(newRes));
+			});
+		}
+
+		settingsForm.addEventListener('submit', function(ev) {
+			ev.preventDefault();
+			run('save_settings', formArgs(settingsForm)).then(notifyResult).then(refresh);
+		});
+
+		addForm.addEventListener('submit', function(ev) {
+			ev.preventDefault();
+			run('add_miner', formArgs(addForm)).then(notifyResult).then(function() {
+				addForm.reset();
+				addForm.elements.api_port.value = '4028';
+				addForm.elements.user.value = 'root';
+				addForm.elements.password.value = 'root';
+				return refresh();
+			});
+		});
+
+		editForm.addEventListener('submit', function(ev) {
+			ev.preventDefault();
+			run('edit_miner', formArgs(editForm)).then(notifyResult).then(function() {
+				editForm.classList.add('asic-edit-hidden');
+				return refresh();
+			});
+		});
+
+		viewRoot.querySelector('#asic-edit-cancel').addEventListener('click', function() {
+			editForm.classList.add('asic-edit-hidden');
+			editForm.reset();
+		});
+
+		viewRoot.querySelector('#asic-run-once').addEventListener('click', function() {
+			run('service', [ 'cmd=run-once' ]).then(notifyResult).then(refresh);
+		});
+		viewRoot.querySelector('#asic-telegram-test').addEventListener('click', function() {
+			run('service', [ 'cmd=telegram-test' ]).then(notifyResult).then(refresh);
+		});
+		viewRoot.querySelector('#asic-restart').addEventListener('click', function() {
+			run('service', [ 'cmd=restart' ]).then(notifyResult).then(refresh);
+		});
+
+		renderRows(data);
+		poll.add(refresh);
+		return viewRoot;
+	}
+});

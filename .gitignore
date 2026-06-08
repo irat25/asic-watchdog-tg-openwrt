@@ -1,0 +1,5 @@
+*.tar.gz
+*.zip
+*.ipk
+.DS_Store
+Thumbs.db
