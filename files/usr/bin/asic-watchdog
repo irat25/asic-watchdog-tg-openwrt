@@ -9,6 +9,7 @@ STATUS_TMP="$RUNDIR/status.json.tmp"
 LOCK_FILE="$RUNDIR/monitor.lock"
 TG_OFFSET_FILE="$RUNDIR/telegram.offset"
 DAEMON_PID_FILE="$RUNDIR/daemon.pid"
+DAEMON_LOCK_DIR="$RUNDIR/daemon.lock"
 
 mkdir -p "$RUNDIR"
 
@@ -52,7 +53,16 @@ safe_id() {
 }
 
 num_or_zero() {
-	printf '%s' "$1" | sed 's/,/./g; s/[^0-9.].*$//' | awk 'NF && $1+0==$1 { print $1+0; ok=1 } END { if (!ok) print 0 }'
+	printf '%s' "$1" | awk '
+	{
+		gsub(/,/, ".")
+		if (match($0, /[-+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?/)) {
+			print substr($0, RSTART, RLENGTH) + 0
+			ok=1
+			exit
+		}
+	}
+	END { if (!ok) print 0 }'
 }
 
 ge_num() {
@@ -268,15 +278,53 @@ bad_share_percent() {
 	awk -v a="$accepted" -v r="$rejected" 'BEGIN { total=a+r; if (total <= 0) print 0; else printf "%.2f", (r*100)/total }'
 }
 
+share_hour_stats() {
+	sample_file="$1"
+	current="$2"
+	accepted_now="$(num_or_zero "$3")"
+	rejected_now="$(num_or_zero "$4")"
+	cutoff=$((current - 3600))
+	tmp_file="$sample_file.tmp"
+	{
+		[ -f "$sample_file" ] && awk -v cutoff="$cutoff" '$1 >= cutoff { print }' "$sample_file"
+		printf '%s %s %s\n' "$current" "$accepted_now" "$rejected_now"
+	} >"$tmp_file"
+	mv "$tmp_file" "$sample_file"
+	awk '
+		NR == 1 { first_t=$1; first_a=$2; first_r=$3 }
+		{ last_t=$1; last_a=$2; last_r=$3 }
+		END {
+			elapsed=last_t-first_t
+			da=last_a-first_a
+			dr=last_r-first_r
+			if (da < 0 || dr < 0) {
+				elapsed=0
+				da=0
+				dr=0
+			}
+			total=da+dr
+			pct=0
+			if (total > 0) pct=(dr*100)/total
+			printf "%.2f %d %.0f %.0f", pct, elapsed, da, dr
+		}
+	' "$sample_file"
+}
+
 load_miner_state() {
 	state_file="$1"
 	idle_count=0
 	hot_count=0
 	bad_count=0
+	hash_drop_count=0
 	last_hw=0
 	last_alert=0
 	last_reboot=0
 	last_status="unknown"
+	baseline_hashrate=0
+	crit_api_down=0
+	crit_fan_fault=0
+	crit_hash_drop=0
+	crit_bad_hour=0
 	[ -f "$state_file" ] && . "$state_file" 2>/dev/null
 }
 
@@ -286,9 +334,15 @@ save_miner_state() {
 		printf 'idle_count=%s\n' "${idle_count:-0}"
 		printf 'hot_count=%s\n' "${hot_count:-0}"
 		printf 'bad_count=%s\n' "${bad_count:-0}"
+		printf 'hash_drop_count=%s\n' "${hash_drop_count:-0}"
 		printf 'last_hw=%s\n' "${hw_errors:-0}"
 		printf 'last_alert=%s\n' "${last_alert:-0}"
 		printf 'last_reboot=%s\n' "${last_reboot:-0}"
+		printf 'baseline_hashrate=%s\n' "${baseline_hashrate:-0}"
+		printf 'crit_api_down=%s\n' "${crit_api_down:-0}"
+		printf 'crit_fan_fault=%s\n' "${crit_fan_fault:-0}"
+		printf 'crit_hash_drop=%s\n' "${crit_hash_drop:-0}"
+		printf 'crit_bad_hour=%s\n' "${crit_bad_hour:-0}"
 		printf "last_status='%s'\n" "$(printf '%s' "${status:-unknown}" | sed "s/'//g")"
 	} >"$state_file"
 }
@@ -325,23 +379,37 @@ urlencode() {
 telegram_send() {
 	text="$1"
 	chat_id="${2:-$(cfg chat_id)}"
+	mode="${3:-plain}"
 	telegram_ready || return 0
 	[ -n "$chat_id" ] || return 0
 	token="$(cfg bot_token)"
 	encoded="$(printf '%s' "$text" | urlencode)"
-	wget -qO- --post-data="chat_id=$chat_id&text=$encoded" "https://api.telegram.org/bot$token/sendMessage" >/dev/null 2>&1 || log "telegram send failed"
+	post_data="chat_id=$chat_id&text=$encoded"
+	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
+	resp="$(wget -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+		log "telegram send failed"
+		return 1
+	}
+	case "$resp" in
+		*'"ok":true'*) return 0 ;;
+		*) log "telegram send rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
+	esac
+	return 1
 }
 
 telegram_send_markup() {
 	text="$1"
 	markup="$2"
 	chat_id="${3:-$(cfg chat_id)}"
+	mode="${4:-plain}"
 	telegram_ready || return 0
 	[ -n "$chat_id" ] || return 0
 	token="$(cfg bot_token)"
 	encoded_text="$(printf '%s' "$text" | urlencode)"
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
-	resp="$(wget -qO- --post-data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+	post_data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup"
+	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
+	resp="$(wget -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
 		log "telegram send markup failed"
 		return 1
 	}
@@ -350,6 +418,16 @@ telegram_send_markup() {
 		*) log "telegram send markup rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
 	esac
 	return 1
+}
+
+html_escape() {
+	sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
+}
+
+miner_link() {
+	link_name="$(printf '%s' "$1" | html_escape)"
+	link_ip="$2"
+	printf '<a href="http://%s">%s</a>' "$link_ip" "$link_name"
 }
 
 telegram_answer_callback() {
@@ -380,6 +458,7 @@ status_key() {
 		Overheat|overheat) echo "overheat" ;;
 		Idle|idle) echo "idle" ;;
 		"Fan fault"|fan_fault) echo "fan_fault" ;;
+		"Hash drop"|hash_drop) echo "hash_drop" ;;
 		"Bad shares"|bad_shares) echo "bad_shares" ;;
 		"API down"|api_down) echo "api_down" ;;
 		RECOVERED|ok|OK) echo "ok" ;;
@@ -476,15 +555,15 @@ $line"
 	[ -n "$fans" ] && alert_out="${alert_out}
 🌀 Все вентиляторы: $fans"
 	if [ -n "$hash" ]; then
-		line="⚡ Хешрейт: $(format_hashrate "$hash")"
+		line="⚡️ Скорость добычи: $(format_hashrate "$hash")"
 		[ -n "$min_hash" ] && line="$line, минимум $(format_hashrate "$min_hash")"
 		alert_out="${alert_out}
 $line"
 	fi
 	[ -n "$accepted" ] && alert_out="${alert_out}
-✅ Принято шар: $accepted"
+✅ Разгадал блоков: $accepted"
 	[ -n "$rejected" ] && alert_out="${alert_out}
-❌ Отклонено шар: $rejected"
+❌ Не отгадал: $rejected"
 	[ -n "$bad" ] && alert_out="${alert_out}
 📉 Битые шары: $(format_percent "$bad")"
 	[ -n "$hw" ] && alert_out="${alert_out}
@@ -512,20 +591,105 @@ notify_event() {
 	current="$(now)"
 	event_key="$(status_key "$status_text")"
 	cooldown="$(cfg alert_cooldown 3600)"
+	linked_name="$(miner_link "$name" "$ip")"
+	if [ "$event_key" = "api_down" ]; then
+		if [ "${last_status:-unknown}" != "api_down" ]; then
+			msg="🚨 ${linked_name} выключен
+
+Нет ответа от ASIC/API.
+Проверка каждые $(cfg interval 30) сек. Следующее уведомление будет когда устройство включится."
+			telegram_send "$msg" "" html
+			log "$name $ip offline $detail"
+			last_alert="$current"
+		fi
+		return 0
+	fi
+	if [ "$event_key" = "ok" ] && [ "${last_status:-unknown}" = "api_down" ]; then
+		msg="✅ ${linked_name} включился
+
+ASIC снова отвечает.
+🌡 Температура: $(format_temp "${temp:-$(detail_value "$detail" temp)}")
+⚡️ Скорость добычи: $(format_hashrate "${hashrate:-$(detail_value "$detail" hash)}")"
+		telegram_send "$msg" "" html
+		log "$name $ip online $detail"
+		last_alert="$current"
+		return 0
+	fi
 	if [ "$event_key" != "${last_status:-unknown}" ] || [ $((current - ${last_alert:-0})) -ge "$cooldown" ]; then
 		icon="$(telegram_status_icon "$event_key")"
 		display_status="$(telegram_status_label "$status_text")"
-		formatted_detail="$(format_alert_detail "$status_text" "$detail")"
-		msg="🚨 $(cfg router_label "OpenWrt ASIC Watchdog")
-$icon $display_status
-$name
-IP: $ip
+		metric_temp="${temp:-$(detail_value "$detail" temp)}"
+		metric_limit="$(detail_value "$detail" limit)"
+		metric_hash="${hashrate:-$(detail_value "$detail" hash)}"
+		metric_accepted="${accepted:-$(detail_value "$detail" accepted)}"
+		metric_rejected="${rejected:-$(detail_value "$detail" rejected)}"
+		metric_bad="${bad_pct:-$(detail_value "$detail" bad)}"
+		metric_hw_delta="${hw_delta:-$(detail_value "$detail" hw_delta)}"
+		metric_hw="${hw_errors:-$(detail_value "$detail" hw)}"
+		[ -n "$metric_bad" ] || metric_bad="0"
+		[ -n "$metric_hw_delta" ] || metric_hw_delta="${metric_hw:-0}"
+		bad_limit="$(cfg bad_share_percent 3)"
+		if gt_num "$metric_bad" "$bad_limit"; then
+			bad_note="выше лимита ${bad_limit}%, проверь пул/сеть/разгон"
+		else
+			bad_note="низкий показатель, всё хорошо"
+		fi
+		if gt_num "$metric_hw_delta" 0; then
+			hw_note="HW = аппаратные ошибки чипов/плат; проверь разгон, питание и охлаждение"
+		else
+			hw_note="HW = аппаратные ошибки чипов/плат; 0 — хорошо"
+		fi
+		temp_line="🌡 Температура: $(format_temp "$metric_temp")"
+		[ -n "$metric_limit" ] && temp_line="$temp_line, лимит для уведомлений $(format_temp "$metric_limit")"
+		msg="🚨 ${linked_name}   ${icon} ${display_status}
 
-$formatted_detail"
-		telegram_send "$msg"
+${temp_line}
+⚡️ Скорость добычи: $(format_hashrate "$metric_hash")
+✅ Разгадал блоков: ${metric_accepted:-0} ❌ Не отгадал: ${metric_rejected:-0}
+📉 Битые шары: $(format_percent "$metric_bad") ($bad_note)
+🧯 HW ошибок за цикл: ${metric_hw_delta:-0} ($hw_note)
+$(alert_recommendation "$status_text")"
+		telegram_send "$msg" "" html
 		log "$name $ip $status_text $detail"
 		last_alert="$current"
 	fi
+}
+
+critical_notify() {
+	key="$1"
+	active="$2"
+	alert_msg="$3"
+	recover_msg="$4"
+	case "$key" in
+		api_down) flag="${crit_api_down:-0}" ;;
+		fan_fault) flag="${crit_fan_fault:-0}" ;;
+		hash_drop) flag="${crit_hash_drop:-0}" ;;
+		bad_hour) flag="${crit_bad_hour:-0}" ;;
+		*) return 0 ;;
+	esac
+
+	if [ "$active" = "1" ]; then
+		[ "$flag" = "1" ] && return 0
+		telegram_send "$alert_msg" "" html
+		log "$name $ip critical $key"
+		case "$key" in
+			api_down) crit_api_down=1 ;;
+			fan_fault) crit_fan_fault=1 ;;
+			hash_drop) crit_hash_drop=1 ;;
+			bad_hour) crit_bad_hour=1 ;;
+		esac
+	else
+		[ "$flag" = "1" ] || return 0
+		telegram_send "$recover_msg" "" html
+		log "$name $ip recovered $key"
+		case "$key" in
+			api_down) crit_api_down=0 ;;
+			fan_fault) crit_fan_fault=0 ;;
+			hash_drop) crit_hash_drop=0 ;;
+			bad_hour) crit_bad_hour=0 ;;
+		esac
+	fi
+	last_alert="$(now)"
 }
 
 reboot_miner_section() {
@@ -636,6 +800,7 @@ check_miner() {
 	min_hashrate="$(section_cfg "$sec" min_hashrate "$(cfg min_hashrate 1)")"
 	fail_cycles="$(cfg fail_cycles 2)"
 	state_file="$RUNDIR/miner-$(safe_id "$name-$ip").state"
+	share_sample_file="$RUNDIR/shares-$(safe_id "$name-$ip").tsv"
 	load_miner_state "$state_file"
 
 	status="ok"
@@ -661,6 +826,13 @@ check_miner() {
 	pools=""
 	autotune=""
 	ping=""
+	hw_delta=0
+	bad_hour_pct=0
+	bad_hour_elapsed=0
+	bad_hour_accepted=0
+	bad_hour_rejected=0
+	hash_drop_limit=0
+	hash_recovery_limit=0
 
 	if [ -z "$ip" ]; then
 		status="config_error"
@@ -696,16 +868,82 @@ $pools_raw"
 			ping="$(ping_status "$ip")"
 			bad_pct="$(bad_share_percent "$accepted" "$rejected")"
 			hw_delta="$(awk -v a="$(num_or_zero "$hw_errors")" -v b="$(num_or_zero "${last_hw:-0}")" 'BEGIN { d=a-b; if (d < 0) d=0; print d }')"
+			share_stats="$(share_hour_stats "$share_sample_file" "$current" "$accepted" "$rejected")"
+			bad_hour_pct="$(printf '%s' "$share_stats" | awk '{ print $1 }')"
+			bad_hour_elapsed="$(printf '%s' "$share_stats" | awk '{ print $2 }')"
+			bad_hour_accepted="$(printf '%s' "$share_stats" | awk '{ print $3 }')"
+			bad_hour_rejected="$(printf '%s' "$share_stats" | awk '{ print $4 }')"
+			bad_hour_limit="$(cfg bad_share_hour_percent 1)"
+			hash_drop_percent="$(cfg hashrate_drop_percent 30)"
+			hash_recovery_percent="$(cfg hashrate_recovery_percent 85)"
+			if ! gt_num "${baseline_hashrate:-0}" 0 && gt_num "$hashrate" 0; then
+				baseline_hashrate="$hashrate"
+			fi
+			if gt_num "$hashrate" "${baseline_hashrate:-0}"; then
+				baseline_hashrate="$hashrate"
+			fi
+			hash_drop_limit="$(awk -v b="$(num_or_zero "${baseline_hashrate:-0}")" -v p="$(num_or_zero "$hash_drop_percent")" 'BEGIN { printf "%.2f", b*(100-p)/100 }')"
+			hash_recovery_limit="$(awk -v b="$(num_or_zero "${baseline_hashrate:-0}")" -v p="$(num_or_zero "$hash_recovery_percent")" 'BEGIN { printf "%.2f", b*p/100 }')"
 
 			if ge_num "$temp" "$max_temp" && gt_num "$temp" 0; then hot_count=$((hot_count + 1)); else hot_count=0; fi
 			if gt_num "$min_hashrate" 0 && ge_num "$min_hashrate" "$hashrate"; then idle_count=$((idle_count + 1)); else idle_count=0; fi
-			if pct_gt "$bad_pct" "$(cfg bad_share_percent 3)" || ge_num "$hw_delta" "$(cfg max_hw_errors_delta 100)"; then bad_count=$((bad_count + 1)); else bad_count=0; fi
+			if [ "$bad_hour_elapsed" -ge 3600 ] && pct_gt "$bad_hour_pct" "$bad_hour_limit"; then bad_count=$((bad_count + 1)); else bad_count=0; fi
+			if gt_num "$hash_drop_limit" 0 && gt_num "$hash_drop_limit" "$hashrate"; then
+				hash_drop_count=$((hash_drop_count + 1))
+			elif [ "${crit_hash_drop:-0}" = "1" ] && gt_num "$hash_recovery_limit" "$hashrate"; then
+				hash_drop_count=$((hash_drop_count + 1))
+			else
+				hash_drop_count=0
+			fi
 
-			if gt_num "$fan_count" 0 && gt_num "$(cfg min_fan_rpm 1000)" "$fan_min"; then
+			fan_fault_active=0
+			hash_drop_active=0
+			bad_hour_active=0
+			if gt_num "$fan_count" 0 && gt_num "$(cfg min_fan_rpm 1000)" "$fan_min"; then fan_fault_active=1; fi
+			if [ "$hash_drop_count" -ge "$fail_cycles" ]; then hash_drop_active=1; fi
+			if [ "$bad_count" -ge "$fail_cycles" ]; then bad_hour_active=1; fi
+			if [ "${crit_bad_hour:-0}" = "1" ] && [ "$bad_hour_elapsed" -lt 3600 ]; then bad_hour_active=1; fi
+
+			linked_name="$(miner_link "$name" "$ip")"
+			critical_notify api_down 0 "🚨 ${linked_name} выключен" "✅ ${linked_name} включился
+
+ASIC снова отвечает.
+🌡 Температура: $(format_temp "$temp")
+⚡️ Скорость добычи: $(format_hashrate "$hashrate")"
+			critical_notify fan_fault "$fan_fault_active" "🚨 ${linked_name}   🌀 Проблема с вентилятором
+
+🌀 Мин. вентилятор: $(format_fan "$fan_min"), лимит $(format_fan "$(cfg min_fan_rpm 1000)")
+🌡 Температура: $(format_temp "$temp")
+⚡️ Скорость добычи: $(format_hashrate "$hashrate")
+💡 Проверь вентилятор, разъём, питание и обороты по платам." "✅ ${linked_name} вентилятор восстановился
+
+🌀 Мин. вентилятор: $(format_fan "$fan_min")
+🌡 Температура: $(format_temp "$temp")"
+			critical_notify hash_drop "$hash_drop_active" "🚨 ${linked_name}   📉 Сильное снижение скорости добычи
+
+⚡️ Сейчас: $(format_hashrate "$hashrate")
+📊 Норма/baseline: $(format_hashrate "${baseline_hashrate:-0}")
+📉 Порог тревоги: $(format_hashrate "$hash_drop_limit") (-${hash_drop_percent}%)
+💡 Проверь платы, питание, пул, сеть, температуру и режим разгона." "✅ ${linked_name} скорость добычи восстановилась
+
+⚡️ Сейчас: $(format_hashrate "$hashrate")
+📊 Baseline: $(format_hashrate "${baseline_hashrate:-0}")"
+			critical_notify bad_hour "$bad_hour_active" "🚨 ${linked_name}   ❌ Битые шары выше нормы
+
+📉 За последний час: $(format_percent "$bad_hour_pct"), лимит $(format_percent "$bad_hour_limit")
+✅ Разгадал за час: ${bad_hour_accepted:-0} ❌ Не отгадал за час: ${bad_hour_rejected:-0}
+💡 Проверь пул, сеть, частоты, питание и стабильность плат." "✅ ${linked_name} битые шары восстановились
+
+📉 За последний час: $(format_percent "$bad_hour_pct"), лимит $(format_percent "$bad_hour_limit")"
+
+			if [ "$fan_fault_active" = "1" ]; then
 				status="fan_fault"
 				reason="Fan fault"
 				detail="fan_min=${fan_min}rpm limit=$(cfg min_fan_rpm 1000)rpm fans=${fan_rpm} temp=${temp}C hash=${hashrate}"
-				notify_event "$name" "$ip" "$reason" "$detail"
+			elif [ "$hash_drop_active" = "1" ]; then
+				status="hash_drop"
+				reason="Hash drop"
+				detail="hash=${hashrate} baseline=${baseline_hashrate:-0} limit=${hash_drop_limit} temp=${temp}C accepted=${accepted} rejected=${rejected} bad=${bad_pct}%"
 			elif [ "$hot_count" -ge "$fail_cycles" ]; then
 				status="overheat"
 				reason="Overheat"
@@ -718,17 +956,18 @@ $pools_raw"
 				detail="hash=${hashrate} min=${min_hashrate} temp=${temp}C accepted=${accepted} rejected=${rejected} bad=${bad_pct}%"
 				notify_event "$name" "$ip" "$reason" "$detail"
 				maybe_auto_reboot idle "$sec"
-			elif [ "$bad_count" -ge "$fail_cycles" ]; then
+			elif [ "$bad_hour_active" = "1" ]; then
 				status="bad_shares"
 				reason="Bad shares"
-				detail="accepted=${accepted} rejected=${rejected} bad=${bad_pct}% hw=${hw_errors} hw_delta=${hw_delta} hash=${hashrate}"
-				notify_event "$name" "$ip" "$reason" "$detail"
+				detail="accepted=${accepted} rejected=${rejected} bad=${bad_pct}% hour_bad=${bad_hour_pct}% hour_accepted=${bad_hour_accepted} hour_rejected=${bad_hour_rejected} hw=${hw_errors} hw_delta=${hw_delta} hash=${hashrate}"
 				maybe_auto_reboot bad_shares "$sec"
 			else
 				status="ok"
 				reason="OK"
 				detail="hash=${hashrate} temp=${temp}C accepted=${accepted} rejected=${rejected} bad=${bad_pct}% hw=${hw_errors}"
-				if [ "${last_status:-unknown}" != "ok" ] && [ "${last_status:-unknown}" != "unknown" ]; then
+				if [ "${last_status:-unknown}" != "ok" ] && [ "${last_status:-unknown}" != "unknown" ] &&
+					[ "${last_status:-unknown}" != "api_down" ] && [ "${last_status:-unknown}" != "fan_fault" ] &&
+					[ "${last_status:-unknown}" != "hash_drop" ] && [ "${last_status:-unknown}" != "bad_shares" ]; then
 					notify_event "$name" "$ip" "RECOVERED" "$detail"
 				fi
 			fi
@@ -737,7 +976,11 @@ $pools_raw"
 			reason="API down"
 			ping="$(ping_status "$ip")"
 			detail="no answer from $ip:$port ping=$ping"
-			notify_event "$name" "$ip" "$reason" "$detail"
+			linked_name="$(miner_link "$name" "$ip")"
+			critical_notify api_down 1 "🚨 ${linked_name} выключен
+
+Нет ответа от ASIC/API.
+Проверка каждые $(cfg interval 30) сек. Следующее уведомление будет когда устройство включится." "✅ ${linked_name} включился"
 		fi
 	fi
 
@@ -974,6 +1217,7 @@ telegram_status_icon() {
 		ok) printf '🟢' ;;
 		overheat) printf '🔥' ;;
 		fan_fault) printf '🌀' ;;
+		hash_drop) printf '📉' ;;
 		idle) printf '🟡' ;;
 		bad_shares) printf '🟠' ;;
 		api_down) printf '🔴' ;;
@@ -986,6 +1230,7 @@ telegram_status_label() {
 		ok|OK|RECOVERED) printf 'Норма' ;;
 		overheat|Overheat) printf 'Перегрев' ;;
 		fan_fault|"Fan fault") printf 'Проблема с вентилятором' ;;
+		hash_drop|"Hash drop") printf 'Сильное снижение скорости добычи' ;;
 		idle|Idle) printf 'Простой' ;;
 		bad_shares|"Bad shares") printf 'Много битых шар' ;;
 		api_down|"API down") printf 'Нет связи с API' ;;
@@ -1000,6 +1245,7 @@ button_status_text() {
 		ok) printf 'ОК' ;;
 		overheat) printf 'ЖАРА' ;;
 		fan_fault) printf 'ВЕНТ' ;;
+		hash_drop) printf 'ДОБЫЧА' ;;
 		idle) printf 'СТОП' ;;
 		bad_shares) printf 'ШАРЫ' ;;
 		api_down) printf 'СВЯЗЬ' ;;
@@ -1091,13 +1337,13 @@ miner_recommendations() {
 	fi
 	if gt_num "$spread" 20; then
 		notes="$notes
-- Разброс хешрейта по платам: ${spread}%. Возможна просадка одной платы или перегрев."
+- Разброс скорости добычи по платам: ${spread}%. Возможна просадка одной платы или перегрев."
 	fi
 	printf '%s' "$pools" | grep -Eiq 'dead|fail|offline' && notes="$notes
 - Пул: есть признаки Dead/Fail/Offline. Проверь pool URL, DNS и сеть."
 
 	if [ -z "$notes" ]; then
-		echo "- Критичных рекомендаций нет. Наблюдай температуру, rejected и вентиляторы."
+		echo "- Критичных рекомендаций нет. Наблюдай температуру, не отгаданные блоки и вентиляторы."
 	else
 		printf '%s\n' "$notes"
 	fi
@@ -1144,10 +1390,10 @@ ${icon} ${name}
 ${ip} · ${model}
 
 📌 Статус: ${label} (${reason_label})
-⚡ Хешрейт: ${hash_fmt}
+⚡️ Скорость добычи: ${hash_fmt}
 🌡 Температура: ${temp_fmt}
 🌀 Вентиляторы: ${fan_rpm:-нет данных} · мин. ${fan_fmt}
-✅ Accepted: ${accepted:-0}   ❌ Rejected: ${rejected:-0}
+✅ Разгадал блоков: ${accepted:-0}   ❌ Не отгадал: ${rejected:-0}
 🧮 Битые шары: ${bad_pct}%   HW: ${hw_errors}
 🌐 Сеть/API: ${ping:-нет данных}
 ⏱ Аптайм: ${uptime:-нет данных}
@@ -1155,7 +1401,7 @@ ${ip} · ${model}
 Платы и чипы
 🌡 Платы: ${board_temps:-нет данных}
 🔥 Чипы: ${chip_temps:-нет данных}
-⚡ Хеш по платам: ${board_hashrates:-нет данных}
+⚡️ Скорость по платам: ${board_hashrates:-нет данных}
 🧩 Чипы: ${board_chips:-нет данных}
 📋 Состояние: ${board_status:-нет данных}
 🧯 HW по платам: ${board_hw:-нет данных}
@@ -1200,10 +1446,10 @@ telegram_status_menu() {
 		hash_fmt="$(format_hashrate "$hashrate")"
 		temp_fmt="$(format_temp "$temp")"
 		fan_fmt="$(format_fan "$fan_min")"
+		linked_name="$(miner_link "$name" "$ip")"
 		total=$((total + 1))
-		row="${icon} ${name}
-   ${ip} · ${label}
-   ⚡ ${hash_fmt} | 🌡 ${temp_fmt} | 🌀 ${fan_fmt} | ❌ ${bad_pct}%
+		row="${icon} ${linked_name} · ${label}
+   ⚡️ Скорость добычи ${hash_fmt} | 🌡 ${temp_fmt} | 🌀 ${fan_fmt} | ❌ ${bad_pct}%
 "
 		case "$status" in
 			ok)
@@ -1245,19 +1491,15 @@ telegram_status_menu() {
 "
 	[ -n "$ok_body" ] || ok_body="   Нет ASIC в норме
 "
-	text="📊 Мониторинг ASIC
-🕘 ${updated:-unknown}
-
-Итог: 🟢 ${ok_count}/${total} в норме · 🔴 ${issue_count} проблем
-🔥 Перегрев: ${hot_count} · 🌀 Вентилятор: ${fan_fault_count} · 🌐 Нет связи: ${down_count}
-🌡 Макс: ${max_temp_fmt} · 🌀 Мин. вент: ${min_fan_fmt}
+	text="📊 ASIC ${updated:-unknown}
+Итог: 🟢 ${ok_count}/${total} · 🔴 ${issue_count} · 🔥 ${hot_count} · 🌀 ${fan_fault_count} · max ${max_temp_fmt} · min fan ${min_fan_fmt}
 
 🚨 Требуют внимания
 ${issue_body}
 ✅ В норме
 ${ok_body}
-Кнопки ниже: ℹ️ детали, 🔁 перезагрузка с подтверждением."
-	telegram_send_markup "$text" "$markup" "$chat_id"
+Кнопки: ℹ️ детали, 🔁 перезагрузка."
+	telegram_send_markup "$text" "$markup" "$chat_id" html
 }
 
 telegram_handle_callback() {
@@ -1309,10 +1551,10 @@ telegram_handle_callback() {
 			out="$(reboot_miner "$target" 2>&1)"
 			rc=$?
 			if [ "$rc" -eq 0 ]; then
-				telegram_send "✅ Команда перезагрузки отправлена: $name ($ip)
+				telegram_send "✅ Команда перезагрузки отправлена: $name
 $out" "$chat_id"
 			else
-				telegram_send "❌ Не удалось перезагрузить $name ($ip)
+				telegram_send "❌ Не удалось перезагрузить $name
 $out" "$chat_id"
 			fi
 			;;
@@ -1404,11 +1646,23 @@ telegram_poll() {
 }
 
 daemon() {
-	old_pid="$(cat "$DAEMON_PID_FILE" 2>/dev/null || true)"
-	if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-		log "daemon already running pid=$old_pid, exiting duplicate"
-		exit 0
+	if mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; then
+		echo "$$" >"$DAEMON_LOCK_DIR/pid"
+	else
+		lock_pid="$(cat "$DAEMON_LOCK_DIR/pid" 2>/dev/null || true)"
+		if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+			log "daemon already running pid=$lock_pid, exiting duplicate"
+			exit 0
+		fi
+		log "removing stale daemon lock pid=${lock_pid:-unknown}"
+		rm -rf "$DAEMON_LOCK_DIR" 2>/dev/null || true
+		if ! mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; then
+			log "daemon lock busy, exiting duplicate"
+			exit 0
+		fi
+		echo "$$" >"$DAEMON_LOCK_DIR/pid"
 	fi
+	trap 'rm -rf "$DAEMON_LOCK_DIR" "$DAEMON_PID_FILE"; exit 0' INT TERM EXIT
 	echo "$$" >"$DAEMON_PID_FILE"
 	log "daemon started"
 	last_check=0
