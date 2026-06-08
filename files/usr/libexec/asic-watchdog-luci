@@ -50,6 +50,10 @@ miner_sections() {
 	uci -q show "$CONFIG" 2>/dev/null | sed -n "s/^$CONFIG\.\(@miner\[[0-9][0-9]*\]\)=miner$/\1/p"
 }
 
+camera_sections() {
+	uci -q show "$CONFIG" 2>/dev/null | sed -n "s/^$CONFIG\.\(@camera\[[0-9][0-9]*\]\)=camera$/\1/p"
+}
+
 section_cfg() {
 	uci -q get "$CONFIG.$1.$2" 2>/dev/null || printf '%s' "${3:-}"
 }
@@ -88,6 +92,18 @@ config_json() {
 		jfield max_temp "$(section_cfg "$sec" max_temp)"; printf ','
 		jfield min_hashrate "$(section_cfg "$sec" min_hashrate)"; printf ','
 		jfield password_set "$([ -n "$(section_cfg "$sec" password)" ] && echo 1 || echo 0)"
+		printf '}'
+	done
+	printf '],"cameras":['
+	first=1
+	for sec in $(camera_sections); do
+		[ "$first" = 0 ] && printf ','
+		first=0
+		printf '{'
+		jfield section "$sec"; printf ','
+		jfield name "$(section_cfg "$sec" name "$sec")"; printf ','
+		jfield ip "$(section_cfg "$sec" ip)"; printf ','
+		jfield enabled "$(section_cfg "$sec" enabled 1)"
 		printf '}'
 	done
 	printf ']}\n'
@@ -222,6 +238,65 @@ delete_miner() {
 	ok "miner deleted"
 }
 
+add_camera() {
+	ip="$(param ip "$@")"
+	[ -n "$ip" ] || {
+		fail "ip is required"
+		return
+	}
+	name="$(param name "$@")"
+	[ -n "$name" ] || name="$ip"
+	sec="$(uci add "$CONFIG" camera)"
+	uci set "$CONFIG.$sec.enabled=1"
+	uci set "$CONFIG.$sec.name=$name"
+	uci set "$CONFIG.$sec.ip=$ip"
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "camera added"
+}
+
+edit_camera() {
+	sec="$(param section "$@")"
+	[ -n "$sec" ] || {
+		fail "section is required"
+		return
+	}
+	uci -q get "$CONFIG.$sec" >/dev/null 2>&1 || {
+		fail "camera not found"
+		return
+	}
+	ip="$(param ip "$@")"
+	[ -n "$ip" ] || {
+		fail "ip is required"
+		return
+	}
+	name="$(param name "$@")"
+	[ -n "$name" ] || name="$ip"
+	enabled="$(param enabled "$@")"
+	[ -n "$enabled" ] || enabled="1"
+	uci set "$CONFIG.$sec.enabled=$enabled"
+	uci set "$CONFIG.$sec.name=$name"
+	uci set "$CONFIG.$sec.ip=$ip"
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "camera saved"
+}
+
+delete_camera() {
+	sec="$(param section "$@")"
+	[ -n "$sec" ] || {
+		fail "section is required"
+		return
+	}
+	uci delete "$CONFIG.$sec" 2>/dev/null || {
+		fail "delete failed"
+		return
+	}
+	uci commit "$CONFIG"
+	$SERVICE restart >/dev/null 2>&1 || true
+	ok "camera deleted"
+}
+
 reboot_miner() {
 	target="$(param target "$@")"
 	[ -n "$target" ] || target="$(param section "$@")"
@@ -264,6 +339,9 @@ case "$action" in
 	add_miner) add_miner "$@" ;;
 	edit_miner) edit_miner "$@" ;;
 	delete_miner) delete_miner "$@" ;;
+	add_camera) add_camera "$@" ;;
+	edit_camera) edit_camera "$@" ;;
+	delete_camera) delete_camera "$@" ;;
 	reboot_miner) reboot_miner "$@" ;;
 	service) service_action "$@" ;;
 	*) fail "unknown action" ;;

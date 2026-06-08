@@ -48,6 +48,10 @@ miner_sections() {
 	uci -q show "$CONFIG" 2>/dev/null | sed -n "s/^$CONFIG\.\(@miner\[[0-9][0-9]*\]\)=miner$/\1/p"
 }
 
+camera_sections() {
+	uci -q show "$CONFIG" 2>/dev/null | sed -n "s/^$CONFIG\.\(@camera\[[0-9][0-9]*\]\)=camera$/\1/p"
+}
+
 safe_id() {
 	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/_/g'
 }
@@ -343,6 +347,21 @@ save_miner_state() {
 		printf 'crit_fan_fault=%s\n' "${crit_fan_fault:-0}"
 		printf 'crit_hash_drop=%s\n' "${crit_hash_drop:-0}"
 		printf 'crit_bad_hour=%s\n' "${crit_bad_hour:-0}"
+		printf "last_status='%s'\n" "$(printf '%s' "${status:-unknown}" | sed "s/'//g")"
+	} >"$state_file"
+}
+
+load_camera_state() {
+	state_file="$1"
+	last_status="unknown"
+	last_alert=0
+	[ -f "$state_file" ] && . "$state_file" 2>/dev/null
+}
+
+save_camera_state() {
+	state_file="$1"
+	{
+		printf 'last_alert=%s\n' "${last_alert:-0}"
 		printf "last_status='%s'\n" "$(printf '%s' "${status:-unknown}" | sed "s/'//g")"
 	} >"$state_file"
 }
@@ -1024,6 +1043,76 @@ ASIC снова отвечает.
 	} >>"$STATUS_TMP"
 }
 
+check_camera() {
+	sec="$1"
+	enabled="$(section_cfg "$sec" enabled 1)"
+	[ "$enabled" = "1" ] || return 0
+	name="$(section_cfg "$sec" name "$sec")"
+	ip="$(section_cfg "$sec" ip)"
+	state_file="$RUNDIR/camera-$(safe_id "$name-$ip").state"
+	load_camera_state "$state_file"
+	current="$(now)"
+	ping=""
+	status="pending"
+	reason="Waiting"
+	detail=""
+
+	if [ -z "$ip" ]; then
+		status="config_error"
+		reason="No IP"
+		detail="camera has no ip"
+	else
+		ping="$(ping_status "$ip")"
+		case "$ping" in
+			ok*)
+				status="ok"
+				reason="Online"
+				detail="ping=$ping"
+				if [ "${last_status:-unknown}" = "camera_down" ]; then
+					linked_name="$(miner_link "$name" "$ip")"
+					msg="✅ ${linked_name} камера включилась
+
+Ping: $(format_ping_alert "$ping")"
+					telegram_send "$msg" "" html
+					log "camera $name $ip online $detail"
+					last_alert="$current"
+				fi
+				;;
+			*)
+				status="camera_down"
+				reason="Offline"
+				detail="ping=fail"
+				if [ "${last_status:-unknown}" != "camera_down" ]; then
+					linked_name="$(miner_link "$name" "$ip")"
+					msg="📷 ${linked_name} камера отключилась
+
+Ping: нет ответа.
+Проверка каждые $(cfg interval 30) сек. Следующее уведомление будет когда камера включится."
+					telegram_send "$msg" "" html
+					log "camera $name $ip offline $detail"
+					last_alert="$current"
+				fi
+				;;
+		esac
+	fi
+
+	save_camera_state "$state_file"
+
+	[ "$JSON_FIRST" = "0" ] && printf ',' >>"$STATUS_TMP"
+	JSON_FIRST=0
+	{
+		printf '{'
+		jfield section "$sec"; printf ','
+		jfield name "$name"; printf ','
+		jfield ip "$ip"; printf ','
+		jfield status "$status"; printf ','
+		jfield reason "$reason"; printf ','
+		jfield detail "$detail"; printf ','
+		jfield ping "$ping"
+		printf '}'
+	} >>"$STATUS_TMP"
+}
+
 write_status_start() {
 	{
 		printf '{'
@@ -1033,6 +1122,11 @@ write_status_start() {
 		jfield telegram "$(telegram_enabled && echo enabled || echo disabled)"; printf ','
 		printf '"miners":['
 	} >"$STATUS_TMP"
+	JSON_FIRST=1
+}
+
+write_status_cameras_start() {
+	printf '],"cameras":[' >>"$STATUS_TMP"
 	JSON_FIRST=1
 }
 
@@ -1061,6 +1155,10 @@ run_once() {
 	for sec in $(miner_sections); do
 		check_miner "$sec"
 	done
+	write_status_cameras_start
+	for sec in $(camera_sections); do
+		check_camera "$sec"
+	done
 	write_status_end
 	rm -f "$LOCK_FILE/pid" 2>/dev/null
 	rmdir "$LOCK_FILE" 2>/dev/null
@@ -1071,7 +1169,7 @@ status_json() {
 	if [ -f "$STATUS_FILE" ]; then
 		cat "$STATUS_FILE"
 	else
-		printf '{"updated":"","miners":[]}\n'
+		printf '{"updated":"","miners":[],"cameras":[]}\n'
 	fi
 }
 
@@ -1095,7 +1193,15 @@ status_updated() {
 
 miner_objects() {
 	status_json |
-		sed 's/^.*"miners":\[//; s/\]}$//' |
+		sed 's/^.*"miners":\[//; s/\],"cameras":.*$//; s/\]}$//' |
+		sed '/^$/d' |
+		sed 's/},{/}\n/g; s/^{//; s/}$//'
+}
+
+camera_objects() {
+	status_json |
+		sed 's/^.*"cameras":\[//; s/\]}$//' |
+		sed '/^$/d' |
 		sed 's/},{/}\n/g; s/^{//; s/}$//'
 }
 
@@ -1221,6 +1327,7 @@ telegram_status_icon() {
 		idle) printf '🟡' ;;
 		bad_shares) printf '🟠' ;;
 		api_down) printf '🔴' ;;
+		camera_down) printf '📷' ;;
 		*) printf '⚠️' ;;
 	esac
 }
@@ -1234,6 +1341,7 @@ telegram_status_label() {
 		idle|Idle) printf 'Простой' ;;
 		bad_shares|"Bad shares") printf 'Много битых шар' ;;
 		api_down|"API down") printf 'Нет связи с API' ;;
+		camera_down|"Camera down") printf 'Камера offline' ;;
 		AUTO-REBOOT) printf 'Автоперезагрузка' ;;
 		"No IP") printf 'Не указан IP' ;;
 		*) printf 'Внимание' ;;
@@ -1422,9 +1530,12 @@ telegram_status_menu() {
 	miner_objects >"$menu_file"
 	ok_body=""
 	issue_body=""
+	camera_body=""
 	total=0
 	ok_count=0
 	issue_count=0
+	camera_total=0
+	camera_down_count=0
 	down_count=0
 	hot_count=0
 	fan_fault_count=0
@@ -1484,6 +1595,24 @@ telegram_status_menu() {
 		i=$((i + 1))
 	done <"$menu_file"
 	rm -f "$menu_file"
+	camera_file="$RUNDIR/tg-menu-$$.cameras"
+	camera_objects >"$camera_file"
+	while IFS= read -r obj; do
+		[ -n "$obj" ] || continue
+		name="$(json_obj_get "$obj" name)"
+		ip="$(json_obj_get "$obj" ip)"
+		status="$(json_obj_get "$obj" status)"
+		ping="$(json_obj_get "$obj" ping)"
+		icon="$(telegram_status_icon "$status")"
+		label="$(telegram_status_label "$status")"
+		linked_name="$(miner_link "$name" "$ip")"
+		camera_total=$((camera_total + 1))
+		[ "$status" = "camera_down" ] && camera_down_count=$((camera_down_count + 1))
+		camera_body="${camera_body}${icon} ${linked_name} · ${label}
+   🌐 $(format_ping_alert "$ping")
+"
+	done <"$camera_file"
+	rm -f "$camera_file"
 	markup="${markup}]}"
 	max_temp_fmt="$(format_temp "$max_seen")"
 	min_fan_fmt="$(format_fan "$min_fan_seen")"
@@ -1491,13 +1620,17 @@ telegram_status_menu() {
 "
 	[ -n "$ok_body" ] || ok_body="   Нет ASIC в норме
 "
+	[ -n "$camera_body" ] || camera_body="   Камеры не добавлены
+"
 	text="📊 ASIC ${updated:-unknown}
-Итог: 🟢 ${ok_count}/${total} · 🔴 ${issue_count} · 🔥 ${hot_count} · 🌀 ${fan_fault_count} · max ${max_temp_fmt} · min fan ${min_fan_fmt}
+Итог: 🟢 ${ok_count}/${total} · 🔴 ${issue_count} · 📷 ${camera_down_count}/${camera_total} · max ${max_temp_fmt} · min fan ${min_fan_fmt}
 
 🚨 Требуют внимания
 ${issue_body}
 ✅ В норме
 ${ok_body}
+📷 IP-камеры
+${camera_body}
 Кнопки: ℹ️ детали, 🔁 перезагрузка."
 	telegram_send_markup "$text" "$markup" "$chat_id" html
 }

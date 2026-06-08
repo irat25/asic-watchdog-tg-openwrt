@@ -70,6 +70,8 @@ function statusMeta(status) {
 		return { icon: '⚠', label: 'SHARES', tone: 'warn', title: 'Битые шары' };
 	case 'api_down':
 		return { icon: '✕', label: 'API', tone: 'bad', title: 'Нет API' };
+	case 'camera_down':
+		return { icon: '✕', label: 'OFF', tone: 'bad', title: 'Камера недоступна' };
 	case 'config_error':
 		return { icon: '!', label: 'CFG', tone: 'bad', title: 'Ошибка конфига' };
 	default:
@@ -271,6 +273,7 @@ function css() {
 
 function overview(latest) {
 	var miners = ((latest.status || {}).miners || []);
+	var cameras = ((latest.status || {}).cameras || []);
 	var counts = { ok: 0, hot: 0, warn: 0, bad: 0 };
 	miners.forEach(function(m) {
 		var meta = statusMeta(m.status);
@@ -283,11 +286,17 @@ function overview(latest) {
 		else
 			counts.bad++;
 	});
+	cameras.forEach(function(c) {
+		if (c.status === 'ok')
+			counts.ok++;
+		else
+			counts.bad++;
+	});
 	return E('div', { 'class': 'asic-overview', id: 'asic-overview' }, [
 		E('div', { 'class': 'asic-card asic-card-ok' }, [ E('strong', {}, counts.ok), E('span', {}, '✓ работают') ]),
 		E('div', { 'class': 'asic-card asic-card-hot' }, [ E('strong', {}, counts.hot), E('span', {}, '🔥 перегрев') ]),
 		E('div', { 'class': 'asic-card asic-card-warn' }, [ E('strong', {}, counts.warn), E('span', {}, '⚠ предупреждения') ]),
-		E('div', { 'class': 'asic-card asic-card-bad' }, [ E('strong', {}, counts.bad), E('span', {}, '✕ нет API/ошибка') ])
+		E('div', { 'class': 'asic-card asic-card-bad' }, [ E('strong', {}, counts.bad), E('span', {}, '✕ нет API/камера') ])
 	]);
 }
 
@@ -295,6 +304,14 @@ function bySection(status) {
 	var map = {};
 	((status || {}).miners || []).forEach(function(m) {
 		map[m.section] = m;
+	});
+	return map;
+}
+
+function byCameraSection(status) {
+	var map = {};
+	((status || {}).cameras || []).forEach(function(c) {
+		map[c.section] = c;
 	});
 	return map;
 }
@@ -314,7 +331,7 @@ return view.extend({
 		var viewRoot = E('div', { 'class': 'cbi-map' }, [
 			css(),
 			E('h2', {}, 'ASIC Watchdog'),
-			E('div', { 'class': 'cbi-map-descr' }, 'Лёгкий мониторинг Whatsminer/Antminer с Telegram-уведомлениями и ручной перезагрузкой.')
+			E('div', { 'class': 'cbi-map-descr' }, 'Лёгкий мониторинг Whatsminer/Antminer и IP-камер с Telegram-уведомлениями.')
 		]);
 
 		var statusBox = E('div', { 'class': 'cbi-section' }, [
@@ -327,6 +344,16 @@ return view.extend({
 					E('th', {}, 'IP'),
 					E('th', {}, 'Статус'),
 					E('th', {}, 'Метрики'),
+					E('th', {}, '')
+				])
+			]),
+			E('h3', {}, 'IP-камеры'),
+			E('table', { 'class': 'table', id: 'camera-table' }, [
+				E('tr', {}, [
+					E('th', {}, 'Имя'),
+					E('th', {}, 'IP'),
+					E('th', {}, 'Статус'),
+					E('th', {}, 'Ping'),
 					E('th', {}, '')
 				])
 			])
@@ -377,6 +404,17 @@ return view.extend({
 		]);
 		viewRoot.appendChild(addForm);
 
+		var addCameraForm = E('form', { 'class': 'cbi-section', id: 'camera-add' }, [
+			E('h3', {}, 'Добавить IP-камеру'),
+			field('Имя', input('name', '')),
+			field('IP', input('ip', '')),
+			E('p', { 'class': 'asic-form-note' }, 'Камера проверяется обычным ICMP ping. Уведомление отправляется один раз при отключении и один раз при восстановлении.'),
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', { 'class': 'btn cbi-button cbi-button-add', 'type': 'submit' }, 'Добавить камеру')
+			])
+		]);
+		viewRoot.appendChild(addCameraForm);
+
 		var editForm = E('form', { 'class': 'cbi-section asic-edit-hidden', id: 'asic-edit' }, [
 			E('h3', {}, 'Редактировать ASIC'),
 			E('p', { 'class': 'asic-form-note' }, 'Пароль можно оставить пустым, тогда сохранится текущий. Индивидуальные лимиты пустыми наследуют общие настройки.'),
@@ -398,6 +436,19 @@ return view.extend({
 		]);
 		viewRoot.appendChild(editForm);
 
+		var editCameraForm = E('form', { 'class': 'cbi-section asic-edit-hidden', id: 'camera-edit' }, [
+			E('h3', {}, 'Редактировать IP-камеру'),
+			E('input', { 'type': 'hidden', 'name': 'section' }),
+			field('Включена', select('enabled', '1', [ opt('1', 'Да'), opt('0', 'Нет') ])),
+			field('Имя', input('name', '')),
+			field('IP', input('ip', '')),
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', { 'class': 'btn cbi-button cbi-button-save', 'type': 'submit' }, 'Сохранить камеру'),
+				E('button', { 'class': 'btn cbi-button', 'type': 'button', id: 'camera-edit-cancel' }, 'Отмена')
+			])
+		]);
+		viewRoot.appendChild(editCameraForm);
+
 		function fillEditForm(m) {
 			editForm.classList.remove('asic-edit-hidden');
 			editForm.elements.section.value = m.section || '';
@@ -414,10 +465,22 @@ return view.extend({
 			editForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		}
 
+		function fillCameraEditForm(c) {
+			editCameraForm.classList.remove('asic-edit-hidden');
+			editCameraForm.elements.section.value = c.section || '';
+			editCameraForm.elements.enabled.value = c.enabled || '1';
+			editCameraForm.elements.name.value = c.name || '';
+			editCameraForm.elements.ip.value = c.ip || '';
+			editCameraForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		}
+
 		function renderRows(latest) {
 			var table = viewRoot.querySelector('#asic-table');
 			while (table.rows.length > 1)
 				table.deleteRow(1);
+			var cameraTable = viewRoot.querySelector('#camera-table');
+			while (cameraTable.rows.length > 1)
+				cameraTable.deleteRow(1);
 			var nowMs = Date.now();
 			Object.keys(detailOpenUntil).forEach(function(key) {
 				if (detailOpenUntil[key] <= nowMs)
@@ -428,6 +491,8 @@ return view.extend({
 				overviewNode.replaceWith(overview(latest));
 			var cfgNow = (latest.config || {}).miners || [];
 			var stateNow = bySection(latest.status || {});
+			var cameraCfgNow = (latest.config || {}).cameras || [];
+			var cameraStateNow = byCameraSection(latest.status || {});
 			cfgNow.forEach(function(m) {
 				var s = stateNow[m.section] || {};
 				var meta = statusMeta(s.status);
@@ -478,6 +543,28 @@ return view.extend({
 					])
 				]));
 			});
+			cameraCfgNow.forEach(function(c) {
+				var s = cameraStateNow[c.section] || {};
+				var status = s.status || (c.enabled === '0' ? 'disabled' : 'pending');
+				var meta = statusMeta(status);
+				cameraTable.appendChild(E('tr', { 'class': 'asic-row-' + meta.tone }, [
+					E('td', {}, [ E('span', { 'class': 'asic-name' }, c.name || c.section), E('span', { 'class': 'asic-sub' }, c.enabled === '0' ? 'выключена в мониторинге' : 'ICMP ping') ]),
+					E('td', {}, c.ip || ''),
+					E('td', {}, [ badge(status), E('br'), E('small', {}, s.reason || '') ]),
+					E('td', {}, formatPing(s.ping)),
+					E('td', { 'class': 'asic-actions' }, [
+						E('button', { 'class': 'btn cbi-button', 'click': function() {
+							fillCameraEditForm(c);
+						} }, '✎ Изменить'),
+						' ',
+						E('button', { 'class': 'btn cbi-button-negative', 'click': function() {
+							if (!confirm('Удалить IP-камеру из мониторинга?'))
+								return;
+							return run('delete_camera', [ 'section=' + c.section ]).then(notifyResult).then(refresh);
+						} }, '✕ Удалить')
+					])
+				]));
+			});
 			viewRoot.querySelector('#asic-updated').textContent = 'Обновлено: ' + ((latest.status || {}).updated || 'ещё нет данных');
 		}
 
@@ -503,6 +590,14 @@ return view.extend({
 			});
 		});
 
+		addCameraForm.addEventListener('submit', function(ev) {
+			ev.preventDefault();
+			run('add_camera', formArgs(addCameraForm)).then(notifyResult).then(function() {
+				addCameraForm.reset();
+				return refresh();
+			});
+		});
+
 		editForm.addEventListener('submit', function(ev) {
 			ev.preventDefault();
 			run('edit_miner', formArgs(editForm)).then(notifyResult).then(function() {
@@ -511,9 +606,22 @@ return view.extend({
 			});
 		});
 
+		editCameraForm.addEventListener('submit', function(ev) {
+			ev.preventDefault();
+			run('edit_camera', formArgs(editCameraForm)).then(notifyResult).then(function() {
+				editCameraForm.classList.add('asic-edit-hidden');
+				return refresh();
+			});
+		});
+
 		viewRoot.querySelector('#asic-edit-cancel').addEventListener('click', function() {
 			editForm.classList.add('asic-edit-hidden');
 			editForm.reset();
+		});
+
+		viewRoot.querySelector('#camera-edit-cancel').addEventListener('click', function() {
+			editCameraForm.classList.add('asic-edit-hidden');
+			editCameraForm.reset();
 		});
 
 		viewRoot.querySelector('#asic-run-once').addEventListener('click', function() {
