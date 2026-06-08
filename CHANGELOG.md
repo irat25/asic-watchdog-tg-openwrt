@@ -4,6 +4,8 @@
 
 ## 2026-06-08
 
+- Telegram group update parsing is hardened: message, edited_message and callback_query are handled separately, with a log entry for unrecognized updates.
+- Добавлен PID-lock для daemon-процесса, чтобы после обновлений/перезапусков не появлялись два watchdog-экземпляра, конкурирующие за Telegram updates.
 - README обновлён ссылкой на GitHub-репозиторий `irat25/asic-watchdog-tg-openwrt` перед первой публикацией.
 - Улучшены Telegram-уведомления о тревогах: сырые `key=value` заменены на русские строки с единицами измерения, нормальным хешрейтом, accepted/rejected shares и подсказками по причине аварии.
 - Улучшена LuCI-панель деталей: пулы показываются отдельными строками с URL, статусом и логином; uptime форматируется в дни/часы/минуты; ping подписан как ICMP и отображается понятнее.
