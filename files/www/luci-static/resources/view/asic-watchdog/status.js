@@ -95,10 +95,84 @@ function metric(label, value, unit, tone) {
 function detail(label, value, tone) {
 	if (value === undefined || value === null || value === '')
 		value = 'n/a';
+	var content = (typeof value === 'object') ? value : String(value);
 	return E('div', { 'class': 'asic-detail asic-detail-' + (tone || 'plain') }, [
 		E('dt', {}, label),
-		E('dd', {}, String(value))
+		E('dd', {}, content)
 	]);
+}
+
+function pad2(n) {
+	return n < 10 ? '0' + n : String(n);
+}
+
+function formatUptime(value) {
+	var n = Number(value || 0);
+	if (!isFinite(n) || n <= 0)
+		return value || 'нет данных';
+
+	n = Math.floor(n);
+	var d = Math.floor(n / 86400);
+	var h = Math.floor((n % 86400) / 3600);
+	var m = Math.floor((n % 3600) / 60);
+	var s = n % 60;
+
+	if (d > 0)
+		return d + 'д ' + pad2(h) + 'ч ' + pad2(m) + 'м';
+	if (h > 0)
+		return h + 'ч ' + pad2(m) + 'м';
+	return m + 'м ' + pad2(s) + 'с';
+}
+
+function formatPing(value) {
+	var raw = String(value || '');
+	var m = raw.match(/^ok\s+([0-9.]+)ms$/);
+
+	if (raw === 'fail')
+		return 'нет ответа';
+	if (m)
+		return m[1] + ' мс, доступен';
+	return raw || 'нет данных';
+}
+
+function fieldValue(raw, key) {
+	var re = new RegExp('(?:^| )' + key + '=([\\s\\S]*?)(?= [a-z_]+=|$)');
+	var m = String(raw || '').match(re);
+	return m ? m[1] : '';
+}
+
+function splitPoolList(value, isUrl) {
+	if (!value || value === 'n/a')
+		return [];
+	if (isUrl)
+		return value.split(/\/(?=[a-z][a-z0-9+.-]*:\/\/)/i).filter(Boolean);
+	return value.split('/').filter(Boolean);
+}
+
+function formatPools(raw) {
+	var urls = splitPoolList(fieldValue(raw, 'url'), true);
+	var statuses = splitPoolList(fieldValue(raw, 'status'), false);
+	var users = splitPoolList(fieldValue(raw, 'user'), false);
+	var count = Math.max(urls.length, statuses.length, users.length);
+
+	if (!count)
+		return 'нет данных';
+
+	var rows = [];
+	for (var i = 0; i < count; i++) {
+		rows.push(E('div', { 'class': 'asic-pool-row' }, [
+			E('div', { 'class': 'asic-pool-url' }, [
+				E('span', { 'class': 'asic-pool-index' }, String(i + 1) + '. '),
+				urls[i] || 'url не найден'
+			]),
+			E('div', { 'class': 'asic-pool-meta' }, [
+				E('span', {}, 'Статус: ' + (statuses[i] || 'нет данных')),
+				E('span', {}, 'Логин: ' + (users[i] || 'нет данных'))
+			])
+		]));
+	}
+
+	return E('div', { 'class': 'asic-pool-list' }, rows);
 }
 
 function detailGroup(title, items) {
@@ -123,9 +197,9 @@ function detailsPanel(s, fanTone, tempTone) {
 			detail('HW по платам', s.board_hw, Number(s.hw_errors || 0) > 0 ? 'warn' : 'plain')
 		]),
 		detailGroup('Пулы и сеть', [
-			detail('Пулы', s.pools, 'plain'),
-			detail('Ping', s.ping, s.ping === 'fail' ? 'bad' : 'plain'),
-			detail('Uptime', s.uptime, 'plain')
+			detail('Пулы', formatPools(s.pools), 'plain'),
+			detail('Ping ICMP', formatPing(s.ping), s.ping === 'fail' ? 'bad' : 'plain'),
+			detail('Uptime', formatUptime(s.uptime), 'plain')
 		]),
 		detailGroup('Режим', [
 			detail('Autotune', s.autotune, 'plain'),
@@ -178,13 +252,18 @@ function css() {
 		.asic-detail-group dl{margin:0;display:grid;grid-template-columns:minmax(92px,130px) minmax(0,1fr);gap:4px 8px}
 		.asic-detail{display:contents}
 		.asic-detail dt{color:#64748b;font-size:12px}
-		.asic-detail dd{margin:0;font-weight:650;color:#0f172a;font-size:12px;word-break:break-word}
+		.asic-detail dd{margin:0;font-weight:650;color:#0f172a;font-size:12px;word-break:break-word;overflow-wrap:anywhere}
 		.asic-detail-bad{background:#fee2e2;border-color:#fca5a5}.asic-detail-warn{background:#fef3c7;border-color:#fcd34d}
+		.asic-pool-list{display:flex;flex-direction:column;gap:7px}
+		.asic-pool-row{padding:6px 7px;border:1px solid #e2e8f0;border-radius:6px;background:rgba(255,255,255,.62)}
+		.asic-pool-url{font-weight:750;line-height:1.25}
+		.asic-pool-index{color:#64748b;font-weight:700}
+		.asic-pool-meta{display:flex;flex-wrap:wrap;gap:5px 10px;margin-top:4px;color:#64748b;font-weight:650}
 		.asic-name{font-weight:700}.asic-sub{display:block;color:#64748b;font-size:12px;margin-top:2px}
 		.asic-actions{display:flex;gap:6px;flex-wrap:wrap}.asic-actions .btn{margin:0}
 		.asic-edit-hidden{display:none}
 		.asic-form-note{color:#64748b;font-size:12px;margin:4px 0 10px}
-		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd{color:#e5e7eb}.asic-detail-group h4{color:#cbd5e1}}
+		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd{color:#e5e7eb}.asic-detail-group h4{color:#cbd5e1}.asic-pool-row{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index{color:#94a3b8}}
 		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}}
 		@media (max-width:720px){.asic-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.asic-actions .btn{width:100%;margin-top:4px}}
 	`);
