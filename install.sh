@@ -32,8 +32,9 @@ fi
 /etc/init.d/asic-watchdog enable >/dev/null 2>&1 || true
 /etc/init.d/asic-watchdog restart >/dev/null 2>&1 || true
 /etc/init.d/rpcd reload >/dev/null 2>&1 || /etc/init.d/rpcd restart >/dev/null 2>&1 || true
-rm -f /tmp/luci-indexcache 2>/dev/null || true
-rm -f /tmp/luci-modulecache/* 2>/dev/null || true
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null || true
+rm -rf /tmp/luci-modulecache /tmp/luci-modulecache.* 2>/dev/null || true
+/etc/init.d/uhttpd reload >/dev/null 2>&1 || /etc/init.d/uhttpd restart >/dev/null 2>&1 || true
 
 echo "Installed."
 echo "LuCI:  Services -> ASIC Watchdog"
