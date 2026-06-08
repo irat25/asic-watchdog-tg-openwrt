@@ -387,6 +387,122 @@ status_key() {
 	esac
 }
 
+detail_value() {
+	detail_text="$1"
+	key="$2"
+	printf '%s' "$detail_text" | tr ' ' '\n' | sed -n "s/^$key=//p" | sed -n '1p'
+}
+
+format_percent() {
+	value="$1"
+	[ -n "$value" ] || return
+	case "$value" in
+		*%) printf '%s' "$value" ;;
+		*) printf '%s%%' "$value" ;;
+	esac
+}
+
+format_rpm() {
+	value="$(num_or_zero "$1")"
+	if gt_num "$value" 0; then
+		printf '%srpm' "$value"
+	else
+		printf 'нет данных'
+	fi
+}
+
+format_ping_alert() {
+	case "$1" in
+		fail|'') printf 'нет ответа' ;;
+		ok*) printf '%s' "$1" | sed 's/^ok //; s/ms$/ мс/' ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+alert_recommendation() {
+	case "$(status_key "$1")" in
+		overheat)
+			echo "💡 Проверь продув, пыль, температуру помещения и режим разгона."
+			;;
+		fan_fault)
+			echo "💡 Проверь вентилятор, разъём, питание и обороты по платам."
+			;;
+		idle)
+			echo "💡 Проверь пул, сеть, питание и не просела ли одна из плат."
+			;;
+		bad_shares)
+			echo "💡 Проверь пул, сеть, частоты, питание и стабильность плат."
+			;;
+		api_down)
+			echo "💡 Проверь питание ASIC, IP, сеть и доступность порта 4028."
+			;;
+		ok)
+			echo "💡 ASIC снова в норме. Продолжаю наблюдение."
+			;;
+	esac
+}
+
+format_alert_detail() {
+	status_text="$1"
+	detail_text="$2"
+	alert_out=""
+	event_key="$(status_key "$status_text")"
+	temp="$(detail_value "$detail_text" temp)"
+	limit="$(detail_value "$detail_text" limit)"
+	hash="$(detail_value "$detail_text" hash)"
+	min_hash="$(detail_value "$detail_text" min)"
+	accepted="$(detail_value "$detail_text" accepted)"
+	rejected="$(detail_value "$detail_text" rejected)"
+	bad="$(detail_value "$detail_text" bad)"
+	hw="$(detail_value "$detail_text" hw)"
+	hw_delta="$(detail_value "$detail_text" hw_delta)"
+	fan_min="$(detail_value "$detail_text" fan_min)"
+	fans="$(detail_value "$detail_text" fans)"
+	ping="$(detail_value "$detail_text" ping)"
+
+	if [ -n "$temp" ]; then
+		line="🌡 Температура: $(format_temp "$temp")"
+		[ -n "$limit" ] && [ "$event_key" != "fan_fault" ] && line="$line, лимит $(format_temp "$limit")"
+		alert_out="${alert_out}
+$line"
+	fi
+	if [ -n "$fan_min" ]; then
+		line="🌀 Мин. вентилятор: $(format_rpm "$fan_min")"
+		[ -n "$limit" ] && [ "$event_key" = "fan_fault" ] && line="$line, лимит $(format_rpm "$limit")"
+		alert_out="${alert_out}
+$line"
+	fi
+	[ -n "$fans" ] && alert_out="${alert_out}
+🌀 Все вентиляторы: $fans"
+	if [ -n "$hash" ]; then
+		line="⚡ Хешрейт: $(format_hashrate "$hash")"
+		[ -n "$min_hash" ] && line="$line, минимум $(format_hashrate "$min_hash")"
+		alert_out="${alert_out}
+$line"
+	fi
+	[ -n "$accepted" ] && alert_out="${alert_out}
+✅ Принято шар: $accepted"
+	[ -n "$rejected" ] && alert_out="${alert_out}
+❌ Отклонено шар: $rejected"
+	[ -n "$bad" ] && alert_out="${alert_out}
+📉 Битые шары: $(format_percent "$bad")"
+	[ -n "$hw" ] && alert_out="${alert_out}
+🧯 HW ошибок всего: $hw"
+	[ -n "$hw_delta" ] && alert_out="${alert_out}
+🧯 HW ошибок за цикл: $hw_delta"
+	[ -n "$ping" ] && alert_out="${alert_out}
+🌐 Ping: $(format_ping_alert "$ping")"
+	rec="$(alert_recommendation "$status_text")"
+	[ -n "$rec" ] && alert_out="${alert_out}
+$rec"
+
+	if [ -n "$alert_out" ]; then
+		printf '%s\n' "$alert_out" | sed '1{/^$/d;}'
+	else
+		printf '%s\n' "$detail_text"
+	fi
+}
+
 notify_event() {
 	name="$1"
 	ip="$2"
@@ -396,12 +512,15 @@ notify_event() {
 	event_key="$(status_key "$status_text")"
 	cooldown="$(cfg alert_cooldown 3600)"
 	if [ "$event_key" != "${last_status:-unknown}" ] || [ $((current - ${last_alert:-0})) -ge "$cooldown" ]; then
-		badge="$(status_badge "$status_text")"
+		icon="$(telegram_status_icon "$event_key")"
 		display_status="$(telegram_status_label "$status_text")"
-		msg="$(cfg router_label "OpenWrt ASIC Watchdog")
-$badge $name ($ip)
-Статус: $display_status
-$detail"
+		formatted_detail="$(format_alert_detail "$status_text" "$detail")"
+		msg="🚨 $(cfg router_label "OpenWrt ASIC Watchdog")
+$icon $display_status
+$name
+IP: $ip
+
+$formatted_detail"
 		telegram_send "$msg"
 		log "$name $ip $status_text $detail"
 		last_alert="$current"
