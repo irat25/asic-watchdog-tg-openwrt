@@ -439,6 +439,30 @@ telegram_send_markup() {
 	return 1
 }
 
+telegram_edit_markup() {
+	text="$1"
+	markup="$2"
+	chat_id="$3"
+	message_id="$4"
+	mode="${5:-plain}"
+	telegram_ready || return 0
+	[ -n "$chat_id" ] && [ -n "$message_id" ] || return 1
+	token="$(cfg bot_token)"
+	encoded_text="$(printf '%s' "$text" | urlencode)"
+	encoded_markup="$(printf '%s' "$markup" | urlencode)"
+	post_data="chat_id=$chat_id&message_id=$message_id&text=$encoded_text&reply_markup=$encoded_markup"
+	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
+	resp="$(wget -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/editMessageText" 2>/dev/null)" || {
+		log "telegram edit markup failed"
+		return 1
+	}
+	case "$resp" in
+		*'"ok":true'*) return 0 ;;
+		*) log "telegram edit markup rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
+	esac
+	return 1
+}
+
 html_escape() {
 	sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
 }
@@ -1266,6 +1290,24 @@ json_string_field_after() {
 	}'
 }
 
+json_number_field_after() {
+	obj="$1"
+	marker="$2"
+	key="$3"
+	printf '%s' "$obj" | awk -v marker="$marker" -v key="$key" '
+	{
+		m = index($0, marker)
+		if (!m) exit
+		s = substr($0, m + length(marker))
+		pat = "\"" key "\":"
+		p = index(s, pat)
+		if (!p) exit
+		s = substr(s, p + length(pat))
+		if (match(s, /^-?[0-9]+/))
+			print substr(s, RSTART, RLENGTH)
+	}'
+}
+
 json_chat_id_after() {
 	obj="$1"
 	marker="$2"
@@ -1509,7 +1551,9 @@ EOF
 
 telegram_status_menu() {
 	chat_id="$1"
+	message_id="$2"
 	updated="$(status_updated)"
+	panel_time="$(date '+%H:%M:%S')"
 	menu_file="$RUNDIR/tg-menu-$$.miners"
 	miner_objects >"$menu_file"
 	ok_body=""
@@ -1603,7 +1647,7 @@ $(compact_miner_metrics "$hashrate" "$bad_pct" "$temp" "$fan_min")
 "
 	[ -n "$camera_body" ] || camera_body="   Камеры не добавлены
 "
-	text="📊 ASIC ${updated:-unknown}
+	text="📊 ASIC ${updated:-unknown} · панель ${panel_time}
 Итог: 🟢 ${ok_count}/${total} · 🔴 ${issue_count} · 📷 ${camera_down_count}/${camera_total} · max ${max_temp_fmt} · min fan ${min_fan_fmt}
 
 🚨 Требуют внимания
@@ -1613,13 +1657,18 @@ ${ok_body}
 📷 IP-камеры
 ${camera_body}
 Кнопки: ℹ️ детали, 🔁 перезагрузка."
-	telegram_send_markup "$text" "$markup" "$chat_id" html
+	if [ -n "$message_id" ]; then
+		telegram_edit_markup "$text" "$markup" "$chat_id" "$message_id" html
+	else
+		telegram_send_markup "$text" "$markup" "$chat_id" html
+	fi
 }
 
 telegram_handle_callback() {
 	chat_id="$1"
 	data="$2"
 	callback_id="$3"
+	message_id="$4"
 	allowed="$(cfg chat_id)"
 	[ "$chat_id" = "$allowed" ] || {
 		telegram_answer_callback "$callback_id" "Нет доступа"
@@ -1629,7 +1678,7 @@ telegram_handle_callback() {
 		refresh)
 			telegram_answer_callback "$callback_id" "Обновляю..."
 			run_once
-			telegram_status_menu "$chat_id"
+			telegram_status_menu "$chat_id" "$message_id"
 			;;
 		detail:*)
 			idx="${data#detail:}"
@@ -1739,18 +1788,21 @@ telegram_poll() {
 		callback_id="$(json_string_field_after "$item" '"callback_query":' id)"
 		if [ -n "$callback_data" ]; then
 			chat_id="$(json_chat_id_after "$item" '"callback_query":')"
+			message_id="$(json_number_field_after "$item" '"callback_query":' message_id)"
 			text=""
 		else
 			chat_id="$(json_chat_id_after "$item" '"message":')"
+			message_id=""
 			text="$(json_string_field_after "$item" '"message":' text)"
 			if [ -z "$chat_id$text" ]; then
 				chat_id="$(json_chat_id_after "$item" '"edited_message":')"
+				message_id=""
 				text="$(json_string_field_after "$item" '"edited_message":' text)"
 			fi
 		fi
 		[ -n "$update_id" ] && echo $((update_id + 1)) >"$TG_OFFSET_FILE"
 		if [ -n "$chat_id" ] && [ -n "$callback_data" ]; then
-			telegram_handle_callback "$chat_id" "$callback_data" "$callback_id"
+			telegram_handle_callback "$chat_id" "$callback_data" "$callback_id" "$message_id"
 		elif [ -n "$chat_id" ] && [ -n "$text" ]; then
 			telegram_handle_command "$chat_id" "$text"
 		elif [ -n "$update_id" ]; then
