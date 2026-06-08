@@ -1165,6 +1165,10 @@ run_once() {
 	trap - EXIT INT TERM
 }
 
+run_once_async() {
+	"$0" run-once >/dev/null 2>&1 &
+}
+
 status_json() {
 	if [ -f "$STATUS_FILE" ]; then
 		cat "$STATUS_FILE"
@@ -1316,9 +1320,12 @@ json_chat_id_after() {
 		m = index($0, marker)
 		if (!m) exit
 		s = substr($0, m + length(marker))
-		p = index(s, "\"chat\":{\"id\":")
+		p = index(s, "\"chat\":{")
 		if (!p) exit
-		s = substr(s, p + length("\"chat\":{\"id\":"))
+		s = substr(s, p + length("\"chat\":{"))
+		p = index(s, "\"id\":")
+		if (!p) exit
+		s = substr(s, p + length("\"id\":"))
 		if (match(s, /^-?[0-9]+/))
 			print substr(s, RSTART, RLENGTH)
 	}'
@@ -1554,7 +1561,8 @@ telegram_status_menu() {
 	message_id="$2"
 	updated="$(status_updated)"
 	panel_time="$(date '+%H:%M:%S')"
-	menu_file="$RUNDIR/tg-menu-$$.miners"
+	menu_suffix="$(safe_id "$$-${message_id:-new}-$(date +%s)")"
+	menu_file="$(mktemp "$RUNDIR/tg-menu.XXXXXX" 2>/dev/null || printf '%s' "$RUNDIR/tg-menu-$menu_suffix")"
 	miner_objects >"$menu_file"
 	ok_body=""
 	issue_body=""
@@ -1620,7 +1628,7 @@ $(compact_miner_metrics "$hashrate" "$bad_pct" "$temp" "$fan_min")
 		i=$((i + 1))
 	done <"$menu_file"
 	rm -f "$menu_file"
-	camera_file="$RUNDIR/tg-menu-$$.cameras"
+	camera_file="$menu_file.cameras"
 	camera_objects >"$camera_file"
 	while IFS= read -r obj; do
 		[ -n "$obj" ] || continue
@@ -1677,8 +1685,8 @@ telegram_handle_callback() {
 	case "$data" in
 		refresh)
 			telegram_answer_callback "$callback_id" "Обновляю..."
-			run_once
 			telegram_status_menu "$chat_id" "$message_id"
+			("$0" run-once >/dev/null 2>&1; telegram_status_menu "$chat_id" "$message_id") >/dev/null 2>&1 &
 			;;
 		detail:*)
 			idx="${data#detail:}"
@@ -1786,9 +1794,13 @@ telegram_poll() {
 		update_id="$(printf '%s' "$item" | sed -n 's/.*"update_id":\([0-9][0-9]*\).*/\1/p')"
 		callback_data="$(json_string_field_after "$item" '"callback_query":' data)"
 		callback_id="$(json_string_field_after "$item" '"callback_query":' id)"
+		[ -n "$callback_data" ] || callback_data="$(json_string_field "$item" data)"
 		if [ -n "$callback_data" ]; then
 			chat_id="$(json_chat_id_after "$item" '"callback_query":')"
 			message_id="$(json_number_field_after "$item" '"callback_query":' message_id)"
+			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '"message":')"
+			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '')"
+			[ -n "$message_id" ] || message_id="$(json_number_field_after "$item" '' message_id)"
 			text=""
 		else
 			chat_id="$(json_chat_id_after "$item" '"message":')"
@@ -1799,6 +1811,8 @@ telegram_poll() {
 				message_id=""
 				text="$(json_string_field_after "$item" '"edited_message":' text)"
 			fi
+			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '')"
+			[ -n "$text" ] || text="$(json_string_field "$item" text)"
 		fi
 		[ -n "$update_id" ] && echo $((update_id + 1)) >"$TG_OFFSET_FILE"
 		if [ -n "$chat_id" ] && [ -n "$callback_data" ]; then
@@ -1838,7 +1852,7 @@ daemon() {
 			current="$(now)"
 			interval="$(cfg interval 60)"
 			if [ $((current - last_check)) -ge "$interval" ]; then
-				run_once
+				run_once_async
 				last_check="$current"
 			fi
 		fi
