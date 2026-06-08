@@ -5,6 +5,7 @@
 ## 2026-06-08
 
 - Создан отдельный пакет `asic-watchdog-tg-openwrt` из рабочей установки OpenWrt/RouteRich.
+- Добавлена инструкция публикации и обновления GitHub-репозитория в `GITHUB_UPLOAD.md`.
 - Добавлен лёгкий shell-watchdog без Python/Node.js/БД.
 - Добавлен LuCI-раздел `Services -> ASIC Watchdog`.
 - Добавлено добавление, редактирование и удаление ASIC через LuCI.
