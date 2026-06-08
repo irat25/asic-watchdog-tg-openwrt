@@ -203,6 +203,13 @@ function detailsPanel(s, fanTone, tempTone) {
 			detail('Ping ICMP', formatPing(s.ping), s.ping === 'fail' ? 'bad' : 'plain'),
 			detail('Uptime', formatUptime(s.uptime), 'plain')
 		]),
+		detailGroup('Сутки и шары', [
+			detail('Хеш 24ч', formatHash(s.hashrate_24h), 'plain'),
+			detail('Сегодня / вчера', formatShareCompare(s), 'plain'),
+			detail('Шары сегодня', s.accepted_today || 0, 'plain'),
+			detail('Вчера к этому времени', s.accepted_yday_same || 0, 'plain'),
+			detail('Разница', formatSignedPercent(s.accepted_vs_yday_pct), Number(s.accepted_vs_yday_pct || 0) < 0 ? 'warn' : 'plain')
+		]),
 		detailGroup('Режим', [
 			detail('Autotune', s.autotune, 'plain'),
 			detail('API', s.api_ok === '1' ? 'ok' : 'down', s.api_ok === '1' ? 'plain' : 'bad')
@@ -219,6 +226,19 @@ function formatHash(value) {
 	if (n >= 1000)
 		return (n / 1000).toFixed(1) + 'G';
 	return String(value || 0);
+}
+
+function formatSignedPercent(value) {
+	if (value === undefined || value === null || value === '')
+		return 'нет данных';
+	var n = Number(value);
+	if (!isFinite(n))
+		return String(value);
+	return (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
+}
+
+function formatShareCompare(s) {
+	return String(s.accepted_today || 0) + ' / ' + String(s.accepted_yday_same || 0) + ' (' + formatSignedPercent(s.accepted_vs_yday_pct) + ')';
 }
 
 function css() {
@@ -511,9 +531,11 @@ return view.extend({
 					E('td', {}, [
 						E('div', { 'class': 'asic-metric-strip' }, [
 							metric('hash', formatHash(s.hashrate), '', 'plain'),
+							metric('24h', formatHash(s.hashrate_24h), '', 'plain'),
 							metric('temp', s.temp || 0, 'C', tempTone),
 							metric('fan', s.fan_min || 0, 'rpm', fanTone),
 							metric('bad', s.bad_pct || 0, '%', badTone),
+							metric('шары Δ', formatSignedPercent(s.accepted_vs_yday_pct), '', Number(s.accepted_vs_yday_pct || 0) < 0 ? 'warn' : 'plain'),
 							metric('HW', s.hw_errors || 0, '', Number(s.hw_errors || 0) > 0 ? 'warn' : 'plain')
 						]),
 						E('button', { 'class': 'btn cbi-button asic-details-toggle', 'click': function(ev) {

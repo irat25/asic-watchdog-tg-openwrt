@@ -285,6 +285,7 @@ bad_share_percent() {
 share_hour_stats() {
 	sample_file="$1"
 	current="$2"
+	[ -n "$current" ] || current="$(now)"
 	accepted_now="$(num_or_zero "$3")"
 	rejected_now="$(num_or_zero "$4")"
 	cutoff=$((current - 3600))
@@ -310,6 +311,78 @@ share_hour_stats() {
 			pct=0
 			if (total > 0) pct=(dr*100)/total
 			printf "%.2f %d %.0f %.0f", pct, elapsed, da, dr
+		}
+	' "$sample_file"
+}
+
+seconds_of_day() {
+	date '+%H %M %S' | awk '{ print ($1 * 3600) + ($2 * 60) + $3 }'
+}
+
+yesterday_ymd() {
+	current="$1"
+	date -d "@$((current - 86400))" '+%Y%m%d' 2>/dev/null || printf ''
+}
+
+miner_history_stats() {
+	sample_file="$1"
+	current="$2"
+	[ -n "$current" ] || current="$(now)"
+	accepted_now="$(num_or_zero "$3")"
+	rejected_now="$(num_or_zero "$4")"
+	hashrate_now="$(num_or_zero "$5")"
+	today="$(date '+%Y%m%d')"
+	yesterday="$(yesterday_ymd "$current")"
+	sod="$(seconds_of_day)"
+	cutoff=$((current - 172800))
+	tmp_file="$sample_file.tmp"
+	{
+		[ -f "$sample_file" ] && awk -v cutoff="$cutoff" 'NF >= 6 && $1 >= cutoff { print }' "$sample_file"
+		printf '%s %s %s %s %s %s\n' "$current" "$today" "$sod" "$accepted_now" "$rejected_now" "$hashrate_now"
+	} >"$tmp_file"
+	mv "$tmp_file" "$sample_file"
+	awk -v current="$current" -v today="$today" -v yesterday="$yesterday" -v sod="$sod" '
+		{
+			t=$1; ymd=$2; sample_sod=$3; acc=$4; hash=$6
+			if (t >= current - 86400 && hash > 0) {
+				hash_sum += hash
+				hash_count++
+			}
+			if (ymd == today) {
+				if (!today_seen) {
+					today_first = acc
+					today_seen = 1
+				}
+				today_last = acc
+			}
+			if (yesterday != "" && ymd == yesterday) {
+				if (!yday_seen) {
+					yday_first = acc
+					yday_seen = 1
+				}
+				if (sample_sod <= sod) {
+					yday_last = acc
+					yday_same_seen = 1
+				}
+			}
+		}
+		END {
+			hash24 = 0
+			if (hash_count > 0) hash24 = hash_sum / hash_count
+			today_delta = 0
+			if (today_seen) {
+				today_delta = today_last - today_first
+				if (today_delta < 0) today_delta = 0
+			}
+			yday_delta = 0
+			if (yday_seen && yday_same_seen) {
+				yday_delta = yday_last - yday_first
+				if (yday_delta < 0) yday_delta = 0
+			}
+			pct = ""
+			if (yday_delta > 0)
+				pct = sprintf("%+.1f", ((today_delta - yday_delta) * 100) / yday_delta)
+			printf "%.2f %.0f %.0f %s", hash24, today_delta, yday_delta, pct
 		}
 	' "$sample_file"
 }
@@ -663,11 +736,12 @@ ASIC снова отвечает.
 		display_status="$(telegram_status_label "$status_text")"
 		metric_temp="${temp:-$(detail_value "$detail" temp)}"
 		metric_hash="${hashrate:-$(detail_value "$detail" hash)}"
+		metric_hash_24h="${hashrate_24h:-$(detail_value "$detail" hash_24h)}"
 		metric_bad="${bad_pct:-$(detail_value "$detail" bad)}"
 		metric_fan="${fan_min:-$(detail_value "$detail" fan_min)}"
 		[ -n "$metric_bad" ] || metric_bad="0"
 		msg="${icon} ${linked_name} · ${display_status}
-$(compact_miner_metrics "$metric_hash" "$metric_bad" "$metric_temp" "$metric_fan")"
+$(compact_miner_metrics "$metric_hash" "$metric_hash_24h" "$metric_bad" "$metric_temp" "$metric_fan")"
 		telegram_send "$msg" "" html
 		log "$name $ip $status_text $detail"
 		last_alert="$current"
@@ -820,7 +894,9 @@ check_miner() {
 	fail_cycles="$(cfg fail_cycles 2)"
 	state_file="$RUNDIR/miner-$(safe_id "$name-$ip").state"
 	share_sample_file="$RUNDIR/shares-$(safe_id "$name-$ip").tsv"
+	history_sample_file="$RUNDIR/history-$(safe_id "$name-$ip").tsv"
 	load_miner_state "$state_file"
+	current="$(now)"
 
 	status="ok"
 	reason="OK"
@@ -850,6 +926,10 @@ check_miner() {
 	bad_hour_elapsed=0
 	bad_hour_accepted=0
 	bad_hour_rejected=0
+	hashrate_24h=0
+	accepted_today=0
+	accepted_yday_same=0
+	accepted_vs_yday_pct=""
 	hash_drop_limit=0
 	hash_recovery_limit=0
 
@@ -892,6 +972,11 @@ $pools_raw"
 			bad_hour_elapsed="$(printf '%s' "$share_stats" | awk '{ print $2 }')"
 			bad_hour_accepted="$(printf '%s' "$share_stats" | awk '{ print $3 }')"
 			bad_hour_rejected="$(printf '%s' "$share_stats" | awk '{ print $4 }')"
+			history_stats="$(miner_history_stats "$history_sample_file" "$current" "$accepted" "$rejected" "$hashrate")"
+			hashrate_24h="$(printf '%s' "$history_stats" | awk '{ print $1 }')"
+			accepted_today="$(printf '%s' "$history_stats" | awk '{ print $2 }')"
+			accepted_yday_same="$(printf '%s' "$history_stats" | awk '{ print $3 }')"
+			accepted_vs_yday_pct="$(printf '%s' "$history_stats" | awk '{ print $4 }')"
 			bad_hour_limit="$(cfg bad_share_hour_percent 1)"
 			hash_drop_percent="$(cfg hashrate_drop_percent 30)"
 			hash_recovery_percent="$(cfg hashrate_recovery_percent 85)"
@@ -1019,7 +1104,11 @@ ASIC снова отвечает.
 		jfield api_ok "$api_ok"; printf ','
 		jfield temp "$temp"; printf ','
 		jfield hashrate "$hashrate"; printf ','
+		jfield hashrate_24h "$hashrate_24h"; printf ','
 		jfield accepted "$accepted"; printf ','
+		jfield accepted_today "$accepted_today"; printf ','
+		jfield accepted_yday_same "$accepted_yday_same"; printf ','
+		jfield accepted_vs_yday_pct "$accepted_vs_yday_pct"; printf ','
 		jfield rejected "$rejected"; printf ','
 		jfield bad_pct "$bad_pct"; printf ','
 		jfield hw_errors "$hw_errors"; printf ','
@@ -1150,7 +1239,8 @@ run_once() {
 		fi
 	fi
 	echo "$$" >"$LOCK_FILE/pid"
-	trap 'rm -f "$LOCK_FILE/pid" 2>/dev/null; rmdir "$LOCK_FILE" 2>/dev/null' EXIT INT TERM
+	STATUS_TMP="$RUNDIR/status-$$.json.tmp"
+	trap 'rm -f "$LOCK_FILE/pid" "$STATUS_TMP" 2>/dev/null; rmdir "$LOCK_FILE" 2>/dev/null' EXIT INT TERM
 	write_status_start
 	for sec in $(miner_sections); do
 		check_miner "$sec"
@@ -1413,10 +1503,16 @@ format_fan() {
 
 compact_miner_metrics() {
 	hash_fmt="$(format_hashrate "$1")"
-	bad_fmt="$(format_percent "${2:-0}")"
-	temp_fmt="$(format_temp "$3")"
-	fan_fmt="$(format_fan "$4")"
-	printf '⚡️ %s ❌ %s🌡 %s  🌀  %s' "$hash_fmt" "$bad_fmt" "$temp_fmt" "$fan_fmt"
+	hash_24h_fmt="$(format_hashrate "$2")"
+	bad_fmt="$(format_percent "${3:-0}")"
+	temp_fmt="$(format_temp "$4")"
+	fan_fmt="$(format_fan "$5")"
+	if gt_num "$2" 0; then
+		hash_part="${hash_fmt}/${hash_24h_fmt}"
+	else
+		hash_part="$hash_fmt"
+	fi
+	printf '⚡️ %s ❌ %s🌡 %s  🌀  %s' "$hash_part" "$bad_fmt" "$temp_fmt" "$fan_fmt"
 }
 
 hash_spread_percent() {
@@ -1504,7 +1600,11 @@ telegram_miner_detail() {
 	reason="$(json_obj_get "$obj" reason)"
 	temp="$(json_obj_get "$obj" temp)"
 	hashrate="$(json_obj_get "$obj" hashrate)"
+	hashrate_24h="$(json_obj_get "$obj" hashrate_24h)"
 	accepted="$(json_obj_get "$obj" accepted)"
+	accepted_today="$(json_obj_get "$obj" accepted_today)"
+	accepted_yday_same="$(json_obj_get "$obj" accepted_yday_same)"
+	accepted_vs_yday_pct="$(json_obj_get "$obj" accepted_vs_yday_pct)"
 	rejected="$(json_obj_get "$obj" rejected)"
 	bad_pct="$(json_obj_get "$obj" bad_pct)"
 	hw_errors="$(json_obj_get "$obj" hw_errors)"
@@ -1524,6 +1624,9 @@ telegram_miner_detail() {
 	label="$(telegram_status_label "$status")"
 	reason_label="$(telegram_status_label "$reason")"
 	hash_fmt="$(format_hashrate "$hashrate")"
+	hash_24h_fmt="$(format_hashrate "$hashrate_24h")"
+	accepted_delta_text="нет данных"
+	[ -n "$accepted_vs_yday_pct" ] && accepted_delta_text="${accepted_vs_yday_pct}%"
 	temp_fmt="$(format_temp "$temp")"
 	fan_fmt="$(format_fan "$fan_min")"
 	cat <<EOF
@@ -1532,9 +1635,11 @@ ${ip} · ${model}
 
 📌 Статус: ${label} (${reason_label})
 ⚡️ Скорость добычи: ${hash_fmt}
+📊 Средняя за 24ч: ${hash_24h_fmt}
 🌡 Температура: ${temp_fmt}
 🌀 Вентиляторы: ${fan_rpm:-нет данных} · мин. ${fan_fmt}
 ✅ Разгадал блоков: ${accepted:-0}   ❌ Не отгадал: ${rejected:-0}
+📅 Сегодня шар: ${accepted_today:-0} · вчера к этому времени: ${accepted_yday_same:-0} · ${accepted_delta_text}
 🧮 Битые шары: ${bad_pct}%   HW: ${hw_errors}
 🌐 Сеть/API: ${ping:-нет данных}
 ⏱ Аптайм: ${uptime:-нет данных}
@@ -1585,6 +1690,7 @@ telegram_status_menu() {
 		status="$(json_obj_get "$obj" status)"
 		temp="$(json_obj_get "$obj" temp)"
 		hashrate="$(json_obj_get "$obj" hashrate)"
+		hashrate_24h="$(json_obj_get "$obj" hashrate_24h)"
 		bad_pct="$(json_obj_get "$obj" bad_pct)"
 		fan_min="$(json_obj_get "$obj" fan_min)"
 		icon="$(telegram_status_icon "$status")"
@@ -1593,7 +1699,7 @@ telegram_status_menu() {
 		linked_name="$(miner_link "$name" "$ip")"
 		total=$((total + 1))
 		row="${icon} ${linked_name} · ${label}
-$(compact_miner_metrics "$hashrate" "$bad_pct" "$temp" "$fan_min")
+$(compact_miner_metrics "$hashrate" "$hashrate_24h" "$bad_pct" "$temp" "$fan_min")
 "
 		case "$status" in
 			ok)
