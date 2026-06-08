@@ -638,36 +638,12 @@ ASIC снова отвечает.
 		icon="$(telegram_status_icon "$event_key")"
 		display_status="$(telegram_status_label "$status_text")"
 		metric_temp="${temp:-$(detail_value "$detail" temp)}"
-		metric_limit="$(detail_value "$detail" limit)"
 		metric_hash="${hashrate:-$(detail_value "$detail" hash)}"
-		metric_accepted="${accepted:-$(detail_value "$detail" accepted)}"
-		metric_rejected="${rejected:-$(detail_value "$detail" rejected)}"
 		metric_bad="${bad_pct:-$(detail_value "$detail" bad)}"
-		metric_hw_delta="${hw_delta:-$(detail_value "$detail" hw_delta)}"
-		metric_hw="${hw_errors:-$(detail_value "$detail" hw)}"
+		metric_fan="${fan_min:-$(detail_value "$detail" fan_min)}"
 		[ -n "$metric_bad" ] || metric_bad="0"
-		[ -n "$metric_hw_delta" ] || metric_hw_delta="${metric_hw:-0}"
-		bad_limit="$(cfg bad_share_percent 3)"
-		if gt_num "$metric_bad" "$bad_limit"; then
-			bad_note="выше лимита ${bad_limit}%, проверь пул/сеть/разгон"
-		else
-			bad_note="низкий показатель, всё хорошо"
-		fi
-		if gt_num "$metric_hw_delta" 0; then
-			hw_note="HW = аппаратные ошибки чипов/плат; проверь разгон, питание и охлаждение"
-		else
-			hw_note="HW = аппаратные ошибки чипов/плат; 0 — хорошо"
-		fi
-		temp_line="🌡 Температура: $(format_temp "$metric_temp")"
-		[ -n "$metric_limit" ] && temp_line="$temp_line, лимит для уведомлений $(format_temp "$metric_limit")"
-		msg="🚨 ${linked_name}   ${icon} ${display_status}
-
-${temp_line}
-⚡️ Скорость добычи: $(format_hashrate "$metric_hash")
-✅ Разгадал блоков: ${metric_accepted:-0} ❌ Не отгадал: ${metric_rejected:-0}
-📉 Битые шары: $(format_percent "$metric_bad") ($bad_note)
-🧯 HW ошибок за цикл: ${metric_hw_delta:-0} ($hw_note)
-$(alert_recommendation "$status_text")"
+		msg="${icon} ${linked_name} · ${display_status}
+$(compact_miner_metrics "$metric_hash" "$metric_bad" "$metric_temp" "$metric_fan")"
 		telegram_send "$msg" "" html
 		log "$name $ip $status_text $detail"
 		last_alert="$current"
@@ -1386,6 +1362,14 @@ format_fan() {
 	fi
 }
 
+compact_miner_metrics() {
+	hash_fmt="$(format_hashrate "$1")"
+	bad_fmt="$(format_percent "${2:-0}")"
+	temp_fmt="$(format_temp "$3")"
+	fan_fmt="$(format_fan "$4")"
+	printf '⚡️ %s ❌ %s🌡 %s  🌀  %s' "$hash_fmt" "$bad_fmt" "$temp_fmt" "$fan_fmt"
+}
+
 hash_spread_percent() {
 	printf '%s' "$1" | tr '/' '\n' |
 		awk 'NF && $1+0==$1 && $1+0 > 0 {
@@ -1554,13 +1538,10 @@ telegram_status_menu() {
 		icon="$(telegram_status_icon "$status")"
 		label="$(telegram_status_label "$status")"
 		short="$(button_status_text "$status")"
-		hash_fmt="$(format_hashrate "$hashrate")"
-		temp_fmt="$(format_temp "$temp")"
-		fan_fmt="$(format_fan "$fan_min")"
 		linked_name="$(miner_link "$name" "$ip")"
 		total=$((total + 1))
 		row="${icon} ${linked_name} · ${label}
-   ⚡️ Скорость добычи ${hash_fmt} | 🌡 ${temp_fmt} | 🌀 ${fan_fmt} | ❌ ${bad_pct}%
+$(compact_miner_metrics "$hashrate" "$bad_pct" "$temp" "$fan_min")
 "
 		case "$status" in
 			ok)
