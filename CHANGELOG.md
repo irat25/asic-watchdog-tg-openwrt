@@ -4,6 +4,7 @@
 
 ## 2026-06-08
 
+- Исправлен разбор входящих Telegram updates в группе: добавлен `json_string_field()` вместо хрупкого `sed` для поля `text`, callback-обновления больше не обрабатываются повторно как обычные команды.
 - Создан отдельный пакет `asic-watchdog-tg-openwrt` из рабочей установки OpenWrt/RouteRich.
 - Добавлена инструкция публикации и обновления GitHub-репозитория в `GITHUB_UPLOAD.md`.
 - Добавлен лёгкий shell-watchdog без Python/Node.js/БД.

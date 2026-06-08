@@ -755,6 +755,37 @@ json_obj_get() {
 	}'
 }
 
+json_string_field() {
+	obj="$1"
+	key="$2"
+	printf '%s' "$obj" | awk -v key="$key" '
+	BEGIN { pat = "\"" key "\":\"" }
+	{
+		p = index($0, pat)
+		if (!p) exit
+		s = substr($0, p + length(pat))
+		out = ""
+		esc = 0
+		for (i = 1; i <= length(s); i++) {
+			c = substr(s, i, 1)
+			if (esc) {
+				if (c == "n") out = out "\n"
+				else if (c == "t") out = out " "
+				else if (c == "r") out = out ""
+				else out = out c
+				esc = 0
+			} else if (c == "\\") {
+				esc = 1
+			} else if (c == "\"") {
+				print out
+				exit
+			} else {
+				out = out c
+			}
+		}
+	}'
+}
+
 miner_obj_by_index() {
 	want="$1"
 	i=0
@@ -1152,12 +1183,15 @@ telegram_poll() {
 	printf '%s' "$json" | sed 's/},{"update_id"/}\n{"update_id"/g' | while IFS= read -r item; do
 		update_id="$(printf '%s' "$item" | sed -n 's/.*"update_id":\([0-9][0-9]*\).*/\1/p')"
 		chat_id="$(printf '%s' "$item" | sed -n 's/.*"chat":{"id":\(-*[0-9][0-9]*\).*/\1/p')"
-		text="$(printf '%s' "$item" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p' | sed 's#\\/#/#g')"
+		text="$(json_string_field "$item" text)"
 		callback_id="$(printf '%s' "$item" | sed -n 's/.*"callback_query":{"id":"\([^"]*\)".*/\1/p')"
-		callback_data="$(printf '%s' "$item" | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')"
+		callback_data="$(json_string_field "$item" data)"
 		[ -n "$update_id" ] && echo $((update_id + 1)) >"$TG_OFFSET_FILE"
-		[ -n "$chat_id" ] && [ -n "$callback_data" ] && telegram_handle_callback "$chat_id" "$callback_data" "$callback_id"
-		[ -n "$chat_id" ] && [ -n "$text" ] && telegram_handle_command "$chat_id" "$text"
+		if [ -n "$chat_id" ] && [ -n "$callback_data" ]; then
+			telegram_handle_callback "$chat_id" "$callback_data" "$callback_id"
+		elif [ -n "$chat_id" ] && [ -n "$text" ]; then
+			telegram_handle_command "$chat_id" "$text"
+		fi
 	done
 }
 
