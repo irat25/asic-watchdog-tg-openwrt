@@ -177,15 +177,87 @@ function formatPools(raw) {
 	return E('div', { 'class': 'asic-pool-list' }, rows);
 }
 
-function detailGroup(title, items) {
-	return E('section', { 'class': 'asic-detail-group' }, [
+function detailGroup(title, items, extraClass) {
+	return E('section', { 'class': 'asic-detail-group' + (extraClass ? ' ' + extraClass : '') }, [
 		E('h4', {}, title),
 		E('dl', {}, items)
 	]);
 }
 
+function parseSeries(value) {
+	return String(value || '').split(',').map(function(v) {
+		var n = Number(v);
+		return isFinite(n) ? n : 0;
+	});
+}
+
+function sparkChart(title, series, formatter, tone) {
+	var values = parseSeries(series).filter(function(v) { return v > 0; });
+	if (!values.length)
+		return E('div', { 'class': 'asic-spark asic-spark-muted' }, [
+			E('div', { 'class': 'asic-spark-title' }, title),
+			E('div', { 'class': 'asic-spark-empty' }, 'нет данных')
+		]);
+
+	var min = Math.min.apply(Math, values);
+	var max = Math.max.apply(Math, values);
+	var spread = max - min;
+	var bars = values.map(function(v) {
+		var h = spread > 0 ? 18 + Math.round(((v - min) / spread) * 46) : 38;
+		return E('span', { 'style': 'height:' + h + 'px', 'title': formatter(v) });
+	});
+
+	return E('div', { 'class': 'asic-spark asic-spark-' + (tone || 'plain') }, [
+		E('div', { 'class': 'asic-spark-title' }, [
+			E('strong', {}, title),
+			E('span', {}, formatter(min) + ' ... ' + formatter(max))
+		]),
+		E('div', { 'class': 'asic-spark-bars' }, bars)
+	]);
+}
+
+function analysisPanel(s) {
+	var notes = [];
+	var hash = Number(s.hashrate || 0);
+	var hash24 = Number(s.hashrate_24h || 0);
+	var tempMax = Number(s.temp_max_24h || 0);
+	var tempNow = Number(s.temp || 0);
+	var fanMin = Number(s.fan_min_24h || s.fan_min || 0);
+	var badAvg = Number(s.bad_avg_24h || 0);
+	var badMax = Number(s.bad_max_24h || 0);
+
+	if (hash24 > 0 && hash > 0 && hash < hash24 * 0.9)
+		notes.push('Сейчас хеш ниже среднего за сутки больше чем на 10%.');
+	if (tempMax >= 90 || tempNow >= 90)
+		notes.push('Температура высокая: проверь продув, пыль и температуру помещения.');
+	if (fanMin > 0 && fanMin < 3000)
+		notes.push('Минимальные обороты вентилятора низкие для M30/Z11, стоит проверить вентиляторы.');
+	if (badAvg > 1 || badMax > 2)
+		notes.push('Битые шары заметно растут: проверь пул, сеть, частоты и питание.');
+	if (!notes.length)
+		notes.push('Критичных просадок за сутки не видно, наблюдай температуру и долю битых шар.');
+
+	return E('div', { 'class': 'asic-analysis' }, notes.map(function(note) {
+		return E('div', {}, note);
+	}));
+}
+
+function historyPanel(s) {
+	return E('section', { 'class': 'asic-detail-group asic-detail-group-wide' }, [
+		E('h4', {}, 'Графики 24ч'),
+		E('div', { 'class': 'asic-spark-grid' }, [
+			sparkChart('Хеш', s.hashrate_spark_24h, formatHash, 'plain'),
+			sparkChart('Температура', s.temp_spark_24h, function(v) { return Number(v).toFixed(1) + 'C'; }, 'hot'),
+			sparkChart('Битые шары', s.bad_spark_24h, function(v) { return Number(v).toFixed(2) + '%'; }, 'warn')
+		]),
+		E('div', { 'class': 'asic-analysis-title' }, 'Анализ'),
+		analysisPanel(s)
+	]);
+}
+
 function detailsPanel(s, fanTone, tempTone) {
 	return E('div', { 'class': 'asic-details-panel asic-details-collapsed' }, [
+		historyPanel(s),
 		detailGroup('Охлаждение', [
 			detail('Вентиляторы', s.fan_rpm, fanTone),
 			detail('Мин. RPM', s.fan_min || 0, fanTone),
@@ -205,6 +277,9 @@ function detailsPanel(s, fanTone, tempTone) {
 		]),
 		detailGroup('Сутки и шары', [
 			detail('Хеш 24ч', formatHash(s.hashrate_24h), 'plain'),
+			detail('Темп. сред/max', formatTempPair(s.temp_avg_24h, s.temp_max_24h), Number(s.temp_max_24h || 0) >= 90 ? 'warn' : 'plain'),
+			detail('Мин. fan 24ч', s.fan_min_24h ? String(s.fan_min_24h) + ' RPM' : 'нет данных', Number(s.fan_min_24h || 0) > 0 && Number(s.fan_min_24h || 0) < 3000 ? 'warn' : 'plain'),
+			detail('Bad ср/max', formatBadPair(s.bad_avg_24h, s.bad_max_24h), Number(s.bad_avg_24h || 0) > 1 ? 'warn' : 'plain'),
 			detail('Сегодня / вчера', formatShareCompare(s), 'plain'),
 			detail('Шары сегодня', s.accepted_today || 0, 'plain'),
 			detail('Вчера к этому времени', s.accepted_yday_same || 0, 'plain'),
@@ -226,6 +301,22 @@ function formatHash(value) {
 	if (n >= 1000)
 		return (n / 1000).toFixed(1) + 'G';
 	return String(value || 0);
+}
+
+function formatTempPair(avg, max) {
+	var a = Number(avg || 0);
+	var m = Number(max || 0);
+	if (!isFinite(a) || !isFinite(m) || (a <= 0 && m <= 0))
+		return 'нет данных';
+	return a.toFixed(1) + 'C / ' + m.toFixed(1) + 'C';
+}
+
+function formatBadPair(avg, max) {
+	var a = Number(avg || 0);
+	var m = Number(max || 0);
+	if (!isFinite(a) || !isFinite(m))
+		return 'нет данных';
+	return a.toFixed(2) + '% / ' + m.toFixed(2) + '%';
 }
 
 function formatSignedPercent(value) {
@@ -270,12 +361,24 @@ function css() {
 		.asic-details-panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;max-width:900px}
 		.asic-details-collapsed{display:none}
 		.asic-detail-group{border:1px solid #e2e8f0;border-radius:8px;background:rgba(248,250,252,.86);padding:8px}
+		.asic-detail-group-wide{grid-column:1 / -1}
 		.asic-detail-group h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;color:#475569;letter-spacing:.04em}
 		.asic-detail-group dl{margin:0;display:grid;grid-template-columns:minmax(92px,130px) minmax(0,1fr);gap:4px 8px}
 		.asic-detail{display:contents}
 		.asic-detail dt{color:#64748b;font-size:12px}
 		.asic-detail dd{margin:0;font-weight:650;color:#0f172a;font-size:12px;word-break:break-word;overflow-wrap:anywhere}
 		.asic-detail-bad{background:#fee2e2;border-color:#fca5a5}.asic-detail-warn{background:#fef3c7;border-color:#fcd34d}
+		.asic-spark-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+		.asic-spark{border:1px solid #e2e8f0;border-radius:8px;background:#fff;padding:8px;min-width:0}
+		.asic-spark-title{display:flex;justify-content:space-between;gap:8px;align-items:center;color:#64748b;font-size:11px}
+		.asic-spark-title strong{font-size:12px;color:#0f172a}
+		.asic-spark-bars{height:68px;display:flex;align-items:flex-end;gap:2px;margin-top:8px}
+		.asic-spark-bars span{flex:1;min-width:2px;border-radius:3px 3px 0 0;background:#2563eb}
+		.asic-spark-hot .asic-spark-bars span{background:#dc2626}
+		.asic-spark-warn .asic-spark-bars span{background:#f59e0b}
+		.asic-spark-empty{height:68px;display:flex;align-items:center;color:#94a3b8;font-weight:650}
+		.asic-analysis-title{margin:8px 0 4px;font-size:12px;font-weight:800;color:#475569;text-transform:uppercase}
+		.asic-analysis{display:grid;gap:4px;color:#0f172a;font-weight:650;font-size:12px}
 		.asic-pool-list{display:flex;flex-direction:column;gap:7px}
 		.asic-pool-row{padding:6px 7px;border:1px solid #e2e8f0;border-radius:6px;background:rgba(255,255,255,.62)}
 		.asic-pool-url{font-weight:750;line-height:1.25}
@@ -285,8 +388,8 @@ function css() {
 		.asic-actions{display:flex;gap:6px;flex-wrap:wrap}.asic-actions .btn{margin:0}
 		.asic-edit-hidden{display:none}
 		.asic-form-note{color:#64748b;font-size:12px;margin:4px 0 10px}
-		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd{color:#e5e7eb}.asic-detail-group h4{color:#cbd5e1}.asic-pool-row{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index{color:#94a3b8}}
-		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}}
+		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd,.asic-analysis{color:#e5e7eb}.asic-detail-group h4,.asic-spark-title strong{color:#cbd5e1}.asic-pool-row,.asic-spark{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index,.asic-spark-title{color:#94a3b8}}
+		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}.asic-spark-grid{grid-template-columns:1fr}}
 		@media (max-width:720px){.asic-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.asic-actions .btn{width:100%;margin-top:4px}}
 	`);
 }
@@ -384,6 +487,8 @@ return view.extend({
 			E('h3', {}, 'Настройки'),
 			field('Мониторинг', select('enabled', cfg.enabled || '1', [ opt('1', 'Включен'), opt('0', 'Выключен') ])),
 			field('Интервал, сек', input('interval', cfg.interval || '60')),
+			field('Таймаут проверки, сек', input('monitor_timeout', cfg.monitor_timeout || '180')),
+			field('Таймаут Telegram, сек', input('telegram_timeout', cfg.telegram_timeout || '12')),
 			field('Повтор Telegram тревоги, сек', input('alert_cooldown', cfg.alert_cooldown || '3600')),
 			field('Макс. температура, C', input('max_temp', cfg.max_temp || '85')),
 			field('Мин. хешрейт', input('min_hashrate', cfg.min_hashrate || '1')),

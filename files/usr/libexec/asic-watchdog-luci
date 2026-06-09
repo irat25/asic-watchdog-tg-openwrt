@@ -62,6 +62,8 @@ config_json() {
 	printf '{'
 	jfield enabled "$(uci -q get "$CONFIG.main.enabled" 2>/dev/null || echo 1)"; printf ','
 	jfield interval "$(uci -q get "$CONFIG.main.interval" 2>/dev/null || echo 60)"; printf ','
+	jfield monitor_timeout "$(uci -q get "$CONFIG.main.monitor_timeout" 2>/dev/null || echo 180)"; printf ','
+	jfield telegram_timeout "$(uci -q get "$CONFIG.main.telegram_timeout" 2>/dev/null || echo 12)"; printf ','
 	jfield alert_cooldown "$(uci -q get "$CONFIG.main.alert_cooldown" 2>/dev/null || echo 3600)"; printf ','
 	jfield max_temp "$(uci -q get "$CONFIG.main.max_temp" 2>/dev/null || echo 85)"; printf ','
 	jfield min_hashrate "$(uci -q get "$CONFIG.main.min_hashrate" 2>/dev/null || echo 1)"; printf ','
@@ -118,6 +120,8 @@ status_json() {
 save_settings() {
 	uci set "$CONFIG.main.enabled=$(param enabled "$@")"
 	uci set "$CONFIG.main.interval=$(param interval "$@")"
+	uci set "$CONFIG.main.monitor_timeout=$(param monitor_timeout "$@")"
+	uci set "$CONFIG.main.telegram_timeout=$(param telegram_timeout "$@")"
 	uci set "$CONFIG.main.alert_cooldown=$(param alert_cooldown "$@")"
 	uci set "$CONFIG.main.max_temp=$(param max_temp "$@")"
 	uci set "$CONFIG.main.min_hashrate=$(param min_hashrate "$@")"

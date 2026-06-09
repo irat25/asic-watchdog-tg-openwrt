@@ -17,6 +17,19 @@ log() {
 	logger -t asic-watchdog "$*"
 }
 
+log_limited() {
+	key="$(safe_id "$1")"
+	interval="$2"
+	shift 2
+	current="$(now)"
+	file="$RUNDIR/log-$key.last"
+	last="$(cat "$file" 2>/dev/null || echo 0)"
+	if [ $((current - last)) -ge "$interval" ]; then
+		log "$*"
+		echo "$current" >"$file"
+	fi
+}
+
 cfg() {
 	uci -q get "$CONFIG.main.$1" 2>/dev/null || printf '%s' "${2:-}"
 }
@@ -331,6 +344,9 @@ miner_history_stats() {
 	accepted_now="$(num_or_zero "$3")"
 	rejected_now="$(num_or_zero "$4")"
 	hashrate_now="$(num_or_zero "$5")"
+	temp_now="$(num_or_zero "$6")"
+	fan_now="$(num_or_zero "$7")"
+	bad_now="$(num_or_zero "$8")"
 	today="$(date '+%Y%m%d')"
 	yesterday="$(yesterday_ymd "$current")"
 	sod="$(seconds_of_day)"
@@ -338,15 +354,52 @@ miner_history_stats() {
 	tmp_file="$sample_file.tmp"
 	{
 		[ -f "$sample_file" ] && awk -v cutoff="$cutoff" 'NF >= 6 && $1 >= cutoff { print }' "$sample_file"
-		printf '%s %s %s %s %s %s\n' "$current" "$today" "$sod" "$accepted_now" "$rejected_now" "$hashrate_now"
+		printf '%s %s %s %s %s %s %s %s %s\n' "$current" "$today" "$sod" "$accepted_now" "$rejected_now" "$hashrate_now" "$temp_now" "$fan_now" "$bad_now"
 	} >"$tmp_file"
 	mv "$tmp_file" "$sample_file"
 	awk -v current="$current" -v today="$today" -v yesterday="$yesterday" -v sod="$sod" '
 		{
-			t=$1; ymd=$2; sample_sod=$3; acc=$4; hash=$6
+			t=$1; ymd=$2; sample_sod=$3; acc=$4; hash=$6; temp=$7; fan=$8; bad=$9
 			if (t >= current - 86400 && hash > 0) {
 				hash_sum += hash
 				hash_count++
+				bucket = int((t - (current - 86400)) / 3600)
+				if (bucket < 0) bucket = 0
+				if (bucket > 23) bucket = 23
+				hash_bucket_sum[bucket] += hash
+				hash_bucket_count[bucket]++
+			}
+			if (t >= current - 86400 && temp > 0) {
+				temp_sum += temp
+				temp_count++
+				if (!temp_max_seen || temp > temp_max) {
+					temp_max = temp
+					temp_max_seen = 1
+				}
+				bucket = int((t - (current - 86400)) / 3600)
+				if (bucket < 0) bucket = 0
+				if (bucket > 23) bucket = 23
+				temp_bucket_sum[bucket] += temp
+				temp_bucket_count[bucket]++
+			}
+			if (t >= current - 86400 && fan > 0) {
+				if (!fan_min_seen || fan < fan_min) {
+					fan_min = fan
+					fan_min_seen = 1
+				}
+			}
+			if (t >= current - 86400 && bad >= 0 && NF >= 9) {
+				bad_sum += bad
+				bad_count++
+				if (!bad_max_seen || bad > bad_max) {
+					bad_max = bad
+					bad_max_seen = 1
+				}
+				bucket = int((t - (current - 86400)) / 3600)
+				if (bucket < 0) bucket = 0
+				if (bucket > 23) bucket = 23
+				bad_bucket_sum[bucket] += bad
+				bad_bucket_count[bucket]++
 			}
 			if (ymd == today) {
 				if (!today_seen) {
@@ -369,6 +422,13 @@ miner_history_stats() {
 		END {
 			hash24 = 0
 			if (hash_count > 0) hash24 = hash_sum / hash_count
+			temp_avg = 0
+			if (temp_count > 0) temp_avg = temp_sum / temp_count
+			if (!temp_max_seen) temp_max = 0
+			if (!fan_min_seen) fan_min = 0
+			bad_avg = 0
+			if (bad_count > 0) bad_avg = bad_sum / bad_count
+			if (!bad_max_seen) bad_max = 0
 			today_delta = 0
 			if (today_seen) {
 				today_delta = today_last - today_first
@@ -382,7 +442,19 @@ miner_history_stats() {
 			pct = ""
 			if (yday_delta > 0)
 				pct = sprintf("%+.1f", ((today_delta - yday_delta) * 100) / yday_delta)
-			printf "%.2f %.0f %.0f %s", hash24, today_delta, yday_delta, pct
+			hash_spark = ""
+			temp_spark = ""
+			bad_spark = ""
+			for (i = 0; i < 24; i++) {
+				sep = (i == 0 ? "" : ",")
+				if (hash_bucket_count[i] > 0) hash_spark = hash_spark sep sprintf("%.0f", hash_bucket_sum[i] / hash_bucket_count[i])
+				else hash_spark = hash_spark sep "0"
+				if (temp_bucket_count[i] > 0) temp_spark = temp_spark sep sprintf("%.1f", temp_bucket_sum[i] / temp_bucket_count[i])
+				else temp_spark = temp_spark sep "0"
+				if (bad_bucket_count[i] > 0) bad_spark = bad_spark sep sprintf("%.2f", bad_bucket_sum[i] / bad_bucket_count[i])
+				else bad_spark = bad_spark sep "0"
+			}
+			printf "%.2f|%.0f|%.0f|%s|%.1f|%.1f|%.0f|%.2f|%.2f|%s|%s|%s", hash24, today_delta, yday_delta, pct, temp_avg, temp_max, fan_min, bad_avg, bad_max, hash_spark, temp_spark, bad_spark
 		}
 	' "$sample_file"
 }
@@ -447,6 +519,10 @@ telegram_enabled() {
 	telegram_ready && [ -n "$(cfg chat_id)" ]
 }
 
+telegram_timeout() {
+	cfg telegram_timeout 12
+}
+
 urlencode() {
 	awk '
 	BEGIN {
@@ -478,7 +554,7 @@ telegram_send() {
 	encoded="$(printf '%s' "$text" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(wget -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+	resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
 		log "telegram send failed"
 		return 1
 	}
@@ -501,7 +577,7 @@ telegram_send_markup() {
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(wget -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+	resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
 		log "telegram send markup failed"
 		return 1
 	}
@@ -525,7 +601,7 @@ telegram_edit_markup() {
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&message_id=$message_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(wget -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/editMessageText" 2>/dev/null)" || {
+	resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/editMessageText" 2>/dev/null)" || {
 		log "telegram edit markup failed"
 		return 1
 	}
@@ -553,7 +629,7 @@ telegram_answer_callback() {
 	[ -n "$callback_id" ] || return 0
 	token="$(cfg bot_token)"
 	encoded_text="$(printf '%s' "$text" | urlencode)"
-	wget -qO- --post-data="callback_query_id=$callback_id&text=$encoded_text" "https://api.telegram.org/bot$token/answerCallbackQuery" >/dev/null 2>&1 || true
+	wget -T "$(telegram_timeout)" -qO- --post-data="callback_query_id=$callback_id&text=$encoded_text" "https://api.telegram.org/bot$token/answerCallbackQuery" >/dev/null 2>&1 || true
 }
 
 status_badge() {
@@ -930,6 +1006,14 @@ check_miner() {
 	accepted_today=0
 	accepted_yday_same=0
 	accepted_vs_yday_pct=""
+	temp_avg_24h=0
+	temp_max_24h=0
+	fan_min_24h=0
+	bad_avg_24h=0
+	bad_max_24h=0
+	hashrate_spark_24h=""
+	temp_spark_24h=""
+	bad_spark_24h=""
 	hash_drop_limit=0
 	hash_recovery_limit=0
 
@@ -972,11 +1056,19 @@ $pools_raw"
 			bad_hour_elapsed="$(printf '%s' "$share_stats" | awk '{ print $2 }')"
 			bad_hour_accepted="$(printf '%s' "$share_stats" | awk '{ print $3 }')"
 			bad_hour_rejected="$(printf '%s' "$share_stats" | awk '{ print $4 }')"
-			history_stats="$(miner_history_stats "$history_sample_file" "$current" "$accepted" "$rejected" "$hashrate")"
-			hashrate_24h="$(printf '%s' "$history_stats" | awk '{ print $1 }')"
-			accepted_today="$(printf '%s' "$history_stats" | awk '{ print $2 }')"
-			accepted_yday_same="$(printf '%s' "$history_stats" | awk '{ print $3 }')"
-			accepted_vs_yday_pct="$(printf '%s' "$history_stats" | awk '{ print $4 }')"
+			history_stats="$(miner_history_stats "$history_sample_file" "$current" "$accepted" "$rejected" "$hashrate" "$temp" "$fan_min" "$bad_pct")"
+			hashrate_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $1 }')"
+			accepted_today="$(printf '%s' "$history_stats" | awk -F'|' '{ print $2 }')"
+			accepted_yday_same="$(printf '%s' "$history_stats" | awk -F'|' '{ print $3 }')"
+			accepted_vs_yday_pct="$(printf '%s' "$history_stats" | awk -F'|' '{ print $4 }')"
+			temp_avg_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $5 }')"
+			temp_max_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $6 }')"
+			fan_min_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $7 }')"
+			bad_avg_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $8 }')"
+			bad_max_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $9 }')"
+			hashrate_spark_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $10 }')"
+			temp_spark_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $11 }')"
+			bad_spark_24h="$(printf '%s' "$history_stats" | awk -F'|' '{ print $12 }')"
 			bad_hour_limit="$(cfg bad_share_hour_percent 1)"
 			hash_drop_percent="$(cfg hashrate_drop_percent 30)"
 			hash_recovery_percent="$(cfg hashrate_recovery_percent 85)"
@@ -1105,6 +1197,14 @@ ASIC снова отвечает.
 		jfield temp "$temp"; printf ','
 		jfield hashrate "$hashrate"; printf ','
 		jfield hashrate_24h "$hashrate_24h"; printf ','
+		jfield temp_avg_24h "$temp_avg_24h"; printf ','
+		jfield temp_max_24h "$temp_max_24h"; printf ','
+		jfield fan_min_24h "$fan_min_24h"; printf ','
+		jfield bad_avg_24h "$bad_avg_24h"; printf ','
+		jfield bad_max_24h "$bad_max_24h"; printf ','
+		jfield hashrate_spark_24h "$hashrate_spark_24h"; printf ','
+		jfield temp_spark_24h "$temp_spark_24h"; printf ','
+		jfield bad_spark_24h "$bad_spark_24h"; printf ','
 		jfield accepted "$accepted"; printf ','
 		jfield accepted_today "$accepted_today"; printf ','
 		jfield accepted_yday_same "$accepted_yday_same"; printf ','
@@ -1226,10 +1326,23 @@ write_status_end() {
 
 run_once() {
 	if ! mkdir "$LOCK_FILE" 2>/dev/null; then
-		old_pid="$(cat "$LOCK_FILE/pid" 2>/dev/null || true)"
+		lock_line="$(cat "$LOCK_FILE/pid" 2>/dev/null || true)"
+		old_pid="$(printf '%s' "$lock_line" | awk '{ print $1 }')"
+		old_started="$(printf '%s' "$lock_line" | awk '{ print $2 }')"
+		monitor_timeout="$(cfg monitor_timeout 180)"
 		if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-			log "previous check still running"
-			return 0
+			current="$(now)"
+			lock_age=0
+			[ -n "$old_started" ] && lock_age=$((current - old_started))
+			if [ -z "$old_started" ] || [ "$lock_age" -ge "$monitor_timeout" ]; then
+				log "previous check stale pid=$old_pid age=${lock_age}s timeout=${monitor_timeout}s, stopping it"
+				kill "$old_pid" 2>/dev/null || true
+				sleep 1
+				kill -0 "$old_pid" 2>/dev/null && kill -9 "$old_pid" 2>/dev/null || true
+			else
+				log "previous check still running age=${lock_age}s"
+				return 0
+			fi
 		fi
 		rm -f "$LOCK_FILE/pid" 2>/dev/null || true
 		rmdir "$LOCK_FILE" 2>/dev/null || true
@@ -1238,7 +1351,7 @@ run_once() {
 			return 0
 		fi
 	fi
-	echo "$$" >"$LOCK_FILE/pid"
+	echo "$$ $(now)" >"$LOCK_FILE/pid"
 	STATUS_TMP="$RUNDIR/status-$$.json.tmp"
 	trap 'rm -f "$LOCK_FILE/pid" "$STATUS_TMP" 2>/dev/null; rmdir "$LOCK_FILE" 2>/dev/null' EXIT INT TERM
 	write_status_start
@@ -1421,6 +1534,18 @@ json_chat_id_after() {
 	}'
 }
 
+json_chat_id_any() {
+	obj="$1"
+	printf '%s' "$obj" | sed -n 's/.*"chat":{"id":\(-*[0-9][0-9]*\).*/\1/p' | tail -n 1
+}
+
+telegram_update_lines() {
+	awk '{ printf "%s", $0 }' |
+		sed 's/^.*"result":\[//; s/\][^]]*$//' |
+		sed 's/},{"update_id"/}\n{"update_id"/g' |
+		sed -n '/"update_id":/p'
+}
+
 miner_obj_by_index() {
 	want="$1"
 	i=0
@@ -1601,6 +1726,11 @@ telegram_miner_detail() {
 	temp="$(json_obj_get "$obj" temp)"
 	hashrate="$(json_obj_get "$obj" hashrate)"
 	hashrate_24h="$(json_obj_get "$obj" hashrate_24h)"
+	temp_avg_24h="$(json_obj_get "$obj" temp_avg_24h)"
+	temp_max_24h="$(json_obj_get "$obj" temp_max_24h)"
+	fan_min_24h="$(json_obj_get "$obj" fan_min_24h)"
+	bad_avg_24h="$(json_obj_get "$obj" bad_avg_24h)"
+	bad_max_24h="$(json_obj_get "$obj" bad_max_24h)"
 	accepted="$(json_obj_get "$obj" accepted)"
 	accepted_today="$(json_obj_get "$obj" accepted_today)"
 	accepted_yday_same="$(json_obj_get "$obj" accepted_yday_same)"
@@ -1636,6 +1766,7 @@ ${ip} · ${model}
 📌 Статус: ${label} (${reason_label})
 ⚡️ Скорость добычи: ${hash_fmt}
 📊 Средняя за 24ч: ${hash_24h_fmt}
+📈 24ч: temp ср. $(format_temp "$temp_avg_24h") / max $(format_temp "$temp_max_24h") · fan min $(format_fan "$fan_min_24h") · bad ср. $(format_percent "$bad_avg_24h")
 🌡 Температура: ${temp_fmt}
 🌀 Вентиляторы: ${fan_rpm:-нет данных} · мин. ${fan_fmt}
 ✅ Разгадал блоков: ${accepted:-0}   ❌ Не отгадал: ${rejected:-0}
@@ -1772,9 +1903,21 @@ ${ok_body}
 ${camera_body}
 Кнопки: ℹ️ детали, 🔁 перезагрузка."
 	if [ -n "$message_id" ]; then
-		telegram_edit_markup "$text" "$markup" "$chat_id" "$message_id" html
+		if telegram_edit_markup "$text" "$markup" "$chat_id" "$message_id" html; then
+			log "telegram menu edited chat=$chat_id message=$message_id miners=$total issues=$issue_count cameras=$camera_total"
+			return 0
+		else
+			log "telegram menu edit failed chat=$chat_id message=$message_id"
+			return 1
+		fi
 	else
-		telegram_send_markup "$text" "$markup" "$chat_id" html
+		if telegram_send_markup "$text" "$markup" "$chat_id" html; then
+			log "telegram menu sent chat=$chat_id miners=$total issues=$issue_count cameras=$camera_total"
+			return 0
+		else
+			log "telegram menu send failed chat=$chat_id"
+			return 1
+		fi
 	fi
 }
 
@@ -1893,10 +2036,13 @@ telegram_poll() {
 	token="$(cfg bot_token)"
 	offset="$(cat "$TG_OFFSET_FILE" 2>/dev/null || echo 0)"
 	url="https://api.telegram.org/bot$token/getUpdates?timeout=1&offset=$offset"
-	json="$(wget -qO- "$url" 2>/dev/null)" || return 0
+	json="$(wget -T "$(telegram_timeout)" -qO- "$url" 2>/dev/null)" || {
+		log_limited telegram_poll_failed 60 "telegram poll failed"
+		return 0
+	}
 	[ -n "$json" ] || return 0
 
-	printf '%s' "$json" | sed 's/},{"update_id"/}\n{"update_id"/g' | while IFS= read -r item; do
+	printf '%s' "$json" | telegram_update_lines | while IFS= read -r item; do
 		update_id="$(printf '%s' "$item" | sed -n 's/.*"update_id":\([0-9][0-9]*\).*/\1/p')"
 		callback_data="$(json_string_field_after "$item" '"callback_query":' data)"
 		callback_id="$(json_string_field_after "$item" '"callback_query":' id)"
@@ -1905,7 +2051,8 @@ telegram_poll() {
 			chat_id="$(json_chat_id_after "$item" '"callback_query":')"
 			message_id="$(json_number_field_after "$item" '"callback_query":' message_id)"
 			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '"message":')"
-			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '')"
+			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '"channel_post":')"
+			[ -n "$chat_id" ] || chat_id="$(json_chat_id_any "$item")"
 			[ -n "$message_id" ] || message_id="$(json_number_field_after "$item" '' message_id)"
 			text=""
 		else
@@ -1917,7 +2064,17 @@ telegram_poll() {
 				message_id=""
 				text="$(json_string_field_after "$item" '"edited_message":' text)"
 			fi
-			[ -n "$chat_id" ] || chat_id="$(json_chat_id_after "$item" '')"
+			if [ -z "$chat_id$text" ]; then
+				chat_id="$(json_chat_id_after "$item" '"channel_post":')"
+				message_id=""
+				text="$(json_string_field_after "$item" '"channel_post":' text)"
+			fi
+			if [ -z "$chat_id$text" ]; then
+				chat_id="$(json_chat_id_after "$item" '"edited_channel_post":')"
+				message_id=""
+				text="$(json_string_field_after "$item" '"edited_channel_post":' text)"
+			fi
+			[ -n "$chat_id" ] || chat_id="$(json_chat_id_any "$item")"
 			[ -n "$text" ] || text="$(json_string_field "$item" text)"
 		fi
 		[ -n "$update_id" ] && echo $((update_id + 1)) >"$TG_OFFSET_FILE"
@@ -1926,7 +2083,7 @@ telegram_poll() {
 		elif [ -n "$chat_id" ] && [ -n "$text" ]; then
 			telegram_handle_command "$chat_id" "$text"
 		elif [ -n "$update_id" ]; then
-			log "telegram update ignored update_id=$update_id chat=${chat_id:-unknown} no_text_or_callback"
+			log "telegram update ignored update_id=$update_id chat=${chat_id:-unknown} no_text_or_callback raw=$(printf '%s' "$item" | cut -c1-180)"
 		fi
 	done
 }
@@ -1972,10 +2129,10 @@ case "${1:-status-json}" in
 	status-json) status_json ;;
 	status-text) status_text ;;
 	miners) miners_text ;;
-	telegram-test) telegram_send "[TEST] ASIC Watchdog Telegram delivery check
+	telegram-test) if telegram_send "[TEST] ASIC Watchdog Telegram delivery check
 Router: $(cfg router_label "OpenWrt ASIC Watchdog")
-Chat: $(cfg chat_id)"; echo "telegram test sent to $(cfg chat_id)" ;;
-	telegram-menu) run_once; telegram_status_menu "$(cfg chat_id)"; echo "telegram menu sent to $(cfg chat_id)" ;;
+Chat: $(cfg chat_id)"; then echo "telegram test sent to $(cfg chat_id)"; else echo "telegram test failed for $(cfg chat_id)"; exit 1; fi ;;
+	telegram-menu) run_once; if telegram_status_menu "$(cfg chat_id)"; then echo "telegram menu sent to $(cfg chat_id)"; else echo "telegram menu failed for $(cfg chat_id)"; exit 1; fi ;;
 	telegram-poll) telegram_poll; echo "telegram poll done" ;;
 	reboot) shift; reboot_miner "$1" ;;
 	*) echo "Использование: $0 daemon|run-once|status-json|status-text|miners|telegram-test|telegram-menu|telegram-poll|reboot <имя|ip>" >&2; exit 1 ;;
