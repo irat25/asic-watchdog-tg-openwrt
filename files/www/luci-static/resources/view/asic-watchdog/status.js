@@ -332,10 +332,39 @@ function formatShareCompare(s) {
 	return String(s.accepted_today || 0) + ' / ' + String(s.accepted_yday_same || 0) + ' (' + formatSignedPercent(s.accepted_vs_yday_pct) + ')';
 }
 
+function statusAgeSeconds(status) {
+	var ts = Number((status || {}).updated_ts || 0);
+	if (!isFinite(ts) || ts <= 0)
+		return null;
+	var age = Math.floor((Date.now() / 1000) - ts);
+	return age >= 0 ? age : 0;
+}
+
+function statusUpdatedText(latest) {
+	var status = (latest || {}).status || {};
+	var cfg = (latest || {}).config || {};
+	var age = statusAgeSeconds(status);
+	var staleLimit = Number(cfg.status_stale_timeout || 120);
+	var text = 'Обновлено: ' + (status.updated || 'ещё нет данных');
+	if (age !== null)
+		text += ' · возраст ' + age + ' сек';
+	if (age !== null && isFinite(staleLimit) && age > staleLimit)
+		text += ' · СТАТУС УСТАРЕЛ';
+	return text;
+}
+
+function statusUpdatedClass(latest) {
+	var age = statusAgeSeconds((latest || {}).status || {});
+	var staleLimit = Number(((latest || {}).config || {}).status_stale_timeout || 120);
+	return age !== null && isFinite(staleLimit) && age > staleLimit ? 'asic-updated asic-updated-stale' : 'asic-updated';
+}
+
 function css() {
 	return E('style', {}, `
 		.asic-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 16px}
 		.asic-card{border-radius:8px;padding:12px;border:1px solid #d8e0e8;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+		.asic-updated{font-weight:700}
+		.asic-updated-stale{color:#991b1b;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:8px}
 		.asic-card strong{display:block;font-size:22px;line-height:1.1}
 		.asic-card span{color:#667085;font-size:12px}
 		.asic-card-ok{border-left:5px solid #16a34a}.asic-card-hot{border-left:5px solid #dc2626}.asic-card-warn{border-left:5px solid #f59e0b}.asic-card-bad{border-left:5px solid #7f1d1d}
@@ -388,7 +417,7 @@ function css() {
 		.asic-actions{display:flex;gap:6px;flex-wrap:wrap}.asic-actions .btn{margin:0}
 		.asic-edit-hidden{display:none}
 		.asic-form-note{color:#64748b;font-size:12px;margin:4px 0 10px}
-		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd,.asic-analysis{color:#e5e7eb}.asic-detail-group h4,.asic-spark-title strong{color:#cbd5e1}.asic-pool-row,.asic-spark{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index,.asic-spark-title{color:#94a3b8}}
+		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd,.asic-analysis{color:#e5e7eb}.asic-detail-group h4,.asic-spark-title strong{color:#cbd5e1}.asic-pool-row,.asic-spark{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index,.asic-spark-title{color:#94a3b8}.asic-updated-stale{background:#450a0a;border-color:#991b1b;color:#fecaca}}
 		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}.asic-spark-grid{grid-template-columns:1fr}}
 		@media (max-width:720px){.asic-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.asic-actions .btn{width:100%;margin-top:4px}}
 	`);
@@ -459,7 +488,7 @@ return view.extend({
 
 		var statusBox = E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, 'Состояние'),
-			E('p', { id: 'asic-updated' }, 'Обновлено: ' + (status.updated || 'ещё нет данных')),
+			E('p', { id: 'asic-updated', 'class': statusUpdatedClass(data) }, statusUpdatedText(data)),
 			overview(data),
 			E('table', { 'class': 'table', id: 'asic-table' }, [
 				E('tr', {}, [
@@ -488,6 +517,7 @@ return view.extend({
 			field('Мониторинг', select('enabled', cfg.enabled || '1', [ opt('1', 'Включен'), opt('0', 'Выключен') ])),
 			field('Интервал, сек', input('interval', cfg.interval || '60')),
 			field('Таймаут проверки, сек', input('monitor_timeout', cfg.monitor_timeout || '180')),
+			field('Статус устарел, сек', input('status_stale_timeout', cfg.status_stale_timeout || '120')),
 			field('Таймаут Telegram, сек', input('telegram_timeout', cfg.telegram_timeout || '12')),
 			field('Telegram resolve IP', input('telegram_resolve_ip', cfg.telegram_resolve_ip || '')),
 			field('Повтор Telegram тревоги, сек', input('alert_cooldown', cfg.alert_cooldown || '3600')),
@@ -693,7 +723,9 @@ return view.extend({
 					])
 				]));
 			});
-			viewRoot.querySelector('#asic-updated').textContent = 'Обновлено: ' + ((latest.status || {}).updated || 'ещё нет данных');
+			var updatedNode = viewRoot.querySelector('#asic-updated');
+			updatedNode.textContent = statusUpdatedText(latest);
+			updatedNode.className = statusUpdatedClass(latest);
 		}
 
 		function refresh() {

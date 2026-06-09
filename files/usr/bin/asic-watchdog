@@ -1325,9 +1325,11 @@ Ping: нет ответа.
 }
 
 write_status_start() {
+	current="$(now)"
 	{
 		printf '{'
 		jfield updated "$(date '+%Y-%m-%d %H:%M:%S')"; printf ','
+		jfield updated_ts "$current"; printf ','
 		jfield interval "$(cfg interval 60)"; printf ','
 		jfield service_enabled "$(cfg enabled 1)"; printf ','
 		jfield telegram "$(telegram_enabled && echo enabled || echo disabled)"; printf ','
@@ -1394,11 +1396,35 @@ run_once_async() {
 	"$0" run-once >/dev/null 2>&1 &
 }
 
+status_updated_ts() {
+	sed -n 's/.*"updated_ts":"\([0-9][0-9]*\)".*/\1/p' "$STATUS_FILE" 2>/dev/null | head -n 1
+}
+
+status_age() {
+	ts="$(status_updated_ts)"
+	current="$(now)"
+	if [ -n "$ts" ]; then
+		age=$((current - ts))
+		[ "$age" -ge 0 ] 2>/dev/null && echo "$age" && return 0
+	fi
+	echo 999999
+}
+
+status_stale_timeout() {
+	value="$(cfg status_stale_timeout)"
+	if [ -n "$value" ]; then
+		echo "$value"
+	else
+		interval="$(cfg interval 30)"
+		echo $((interval * 4))
+	fi
+}
+
 status_json() {
 	if [ -f "$STATUS_FILE" ]; then
 		cat "$STATUS_FILE"
 	else
-		printf '{"updated":"","miners":[],"cameras":[]}\n'
+		printf '{"updated":"","updated_ts":"0","miners":[],"cameras":[]}\n'
 	fi
 }
 
@@ -2134,7 +2160,13 @@ daemon() {
 			telegram_poll
 			current="$(now)"
 			interval="$(cfg interval 60)"
-			if [ $((current - last_check)) -ge "$interval" ]; then
+			stale_timeout="$(status_stale_timeout)"
+			age="$(status_age)"
+			if [ "$age" -ge "$stale_timeout" ]; then
+				log_limited status_stale 60 "status stale age=${age}s timeout=${stale_timeout}s, forcing check"
+				run_once_async
+				last_check="$current"
+			elif [ $((current - last_check)) -ge "$interval" ]; then
 				run_once_async
 				last_check="$current"
 			fi

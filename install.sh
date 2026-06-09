@@ -29,6 +29,20 @@ else
 	echo "Keeping existing /etc/config/asic_watchdog"
 fi
 
+set_default() {
+	option="$1"
+	value="$2"
+	if ! uci -q get "asic_watchdog.main.$option" >/dev/null 2>&1; then
+		uci set "asic_watchdog.main.$option=$value"
+	fi
+}
+
+set_default monitor_timeout 180
+set_default status_stale_timeout 120
+set_default telegram_timeout 12
+set_default telegram_resolve_ip ''
+uci commit asic_watchdog >/dev/null 2>&1 || true
+
 /etc/init.d/asic-watchdog enable >/dev/null 2>&1 || true
 /etc/init.d/asic-watchdog restart >/dev/null 2>&1 || true
 /etc/init.d/rpcd reload >/dev/null 2>&1 || /etc/init.d/rpcd restart >/dev/null 2>&1 || true
