@@ -116,14 +116,12 @@ function formatUptime(value) {
 	n = Math.floor(n);
 	var d = Math.floor(n / 86400);
 	var h = Math.floor((n % 86400) / 3600);
-	var m = Math.floor((n % 3600) / 60);
-	var s = n % 60;
 
 	if (d > 0)
-		return d + 'д ' + pad2(h) + 'ч ' + pad2(m) + 'м';
+		return d + 'д ' + h + 'ч';
 	if (h > 0)
-		return h + 'ч ' + pad2(m) + 'м';
-	return m + 'м ' + pad2(s) + 'с';
+		return h + 'ч';
+	return '<1ч';
 }
 
 function formatPing(value) {

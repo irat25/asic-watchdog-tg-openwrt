@@ -1674,6 +1674,23 @@ format_fan() {
 	fi
 }
 
+format_uptime() {
+	raw="$(num_or_zero "$1")"
+	awk -v s="$raw" '
+	BEGIN {
+		s = int(s)
+		if (s <= 0) {
+			printf "нет данных"
+			exit
+		}
+		d = int(s / 86400)
+		h = int((s % 86400) / 3600)
+		if (d > 0) printf "%dд %dч", d, h
+		else if (h > 0) printf "%dч", h
+		else printf "<1ч"
+	}'
+}
+
 compact_miner_metrics() {
 	hash_fmt="$(format_hashrate "$1")"
 	hash_24h_fmt="$(format_hashrate "$2")"
@@ -1807,6 +1824,7 @@ telegram_miner_detail() {
 	[ -n "$accepted_vs_yday_pct" ] && accepted_delta_text="${accepted_vs_yday_pct}%"
 	temp_fmt="$(format_temp "$temp")"
 	fan_fmt="$(format_fan "$fan_min")"
+	uptime_fmt="$(format_uptime "$uptime")"
 	cat <<EOF
 ${icon} ${name}
 ${ip} · ${model}
@@ -1821,7 +1839,7 @@ ${ip} · ${model}
 📅 Сегодня шар: ${accepted_today:-0} · вчера к этому времени: ${accepted_yday_same:-0} · ${accepted_delta_text}
 🧮 Битые шары: ${bad_pct}%   HW: ${hw_errors}
 🌐 Сеть/API: ${ping:-нет данных}
-⏱ Аптайм: ${uptime:-нет данных}
+⏱ Аптайм: ${uptime_fmt}
 
 Платы и чипы
 🌡 Платы: ${board_temps:-нет данных}
@@ -1872,12 +1890,13 @@ telegram_status_menu() {
 		hashrate_24h="$(json_obj_get "$obj" hashrate_24h)"
 		bad_pct="$(json_obj_get "$obj" bad_pct)"
 		fan_min="$(json_obj_get "$obj" fan_min)"
+		uptime="$(json_obj_get "$obj" uptime)"
 		icon="$(telegram_status_icon "$status")"
 		label="$(telegram_status_label "$status")"
 		short="$(button_status_text "$status")"
 		linked_name="$(miner_link "$name" "$ip")"
 		total=$((total + 1))
-		row="${icon} ${linked_name} · ${label}
+		row="${icon} ${linked_name} · ${label} · ⏱ $(format_uptime "$uptime")
 $(compact_miner_metrics "$hashrate" "$hashrate_24h" "$bad_pct" "$temp" "$fan_min")
 "
 		case "$status" in
