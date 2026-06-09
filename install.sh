@@ -41,11 +41,35 @@ set_default monitor_timeout 180
 set_default status_stale_timeout 120
 set_default telegram_timeout 12
 set_default telegram_resolve_ip ''
+set_default telegram_resolve_ips ''
+set_default telegram_recover_failures 3
 set_default telegram_heartbeat_interval 0
 uci commit asic_watchdog >/dev/null 2>&1 || true
 
 /etc/init.d/asic-watchdog enable >/dev/null 2>&1 || true
-/etc/init.d/asic-watchdog restart >/dev/null 2>&1 || true
+/etc/init.d/asic-watchdog stop >/dev/null 2>&1 || true
+for pid in $(ps w | awk '/asic-watchdog\} \/bin\/sh \/usr\/bin\/asic-watchdog daemon/ { print $1 }'); do
+	kill "$pid" 2>/dev/null || true
+done
+killall asic-watchdog 2>/dev/null || true
+sleep 1
+for pid in $(ps w | awk '/asic-watchdog\} \/bin\/sh \/usr\/bin\/asic-watchdog daemon/ { print $1 }'); do
+	kill -9 "$pid" 2>/dev/null || true
+done
+killall -9 asic-watchdog 2>/dev/null || true
+rm -rf /tmp/asic-watchdog/daemon.lock /tmp/asic-watchdog/daemon.pid /tmp/asic-watchdog/monitor.lock /tmp/asic-watchdog/telegram-poll.lock 2>/dev/null || true
+/etc/init.d/asic-watchdog start >/dev/null 2>&1 || true
+sleep 2
+owner="$(cat /tmp/asic-watchdog/daemon.lock/pid 2>/dev/null || true)"
+for pid in $(ps w | awk '/asic-watchdog\} \/bin\/sh \/usr\/bin\/asic-watchdog daemon/ { print $1 }'); do
+	[ -n "$owner" ] && [ "$pid" = "$owner" ] && continue
+	kill "$pid" 2>/dev/null || true
+done
+sleep 1
+for pid in $(ps w | awk '/asic-watchdog\} \/bin\/sh \/usr\/bin\/asic-watchdog daemon/ { print $1 }'); do
+	[ -n "$owner" ] && [ "$pid" = "$owner" ] && continue
+	kill -9 "$pid" 2>/dev/null || true
+done
 /etc/init.d/rpcd reload >/dev/null 2>&1 || /etc/init.d/rpcd restart >/dev/null 2>&1 || true
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* 2>/dev/null || true
 rm -rf /tmp/luci-modulecache /tmp/luci-modulecache.* 2>/dev/null || true

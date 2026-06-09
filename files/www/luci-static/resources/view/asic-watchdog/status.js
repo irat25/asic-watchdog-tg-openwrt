@@ -466,6 +466,8 @@ return view.extend({
 			field('Статус устарел, сек', input('status_stale_timeout', cfg.status_stale_timeout || '120')),
 			field('Таймаут Telegram, сек', input('telegram_timeout', cfg.telegram_timeout || '12')),
 			field('Telegram resolve IP', input('telegram_resolve_ip', cfg.telegram_resolve_ip || '')),
+			field('Telegram reserve IPs', input('telegram_resolve_ips', cfg.telegram_resolve_ips || '')),
+			field('Ошибок TG до восстановления', input('telegram_recover_failures', cfg.telegram_recover_failures || '3')),
 			field('Telegram самотест, сек', input('telegram_heartbeat_interval', cfg.telegram_heartbeat_interval || '0')),
 			field('Повтор Telegram тревоги, сек', input('alert_cooldown', cfg.alert_cooldown || '3600')),
 			field('Макс. температура, C', input('max_temp', cfg.max_temp || '85')),

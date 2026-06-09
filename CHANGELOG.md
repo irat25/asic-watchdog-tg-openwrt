@@ -2,6 +2,18 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.5.5 - 2026-06-09
+
+- Telegram-запросы теперь перебирают несколько реальных IP `api.telegram.org` через `curl --resolve` и запоминают последний рабочий IP.
+- Добавлен счётчик подряд идущих Telegram-ошибок и health-check `getMe` после `telegram_recover_failures` сбоев.
+- Добавлены UCI/LuCI поля `telegram_resolve_ips` и `telegram_recover_failures`.
+- Daemon теперь сам выходит, если потерял владение lock-файлом, чтобы два процесса не читали Telegram updates одновременно.
+- Init/install теперь перед стартом добивают старый daemon `asic-watchdog`, если procd оставил его живым после обновления.
+- Telegram polling now has its own stale-safe lock, so manual checks and daemon polling do not read updates in parallel.
+- Extra daemon processes now exit when another process owns the lock; procd respawn is disabled to avoid duplicate pollers.
+- Telegram `getUpdates` polling now uses POST with `timeout=0`, avoiding router/network hangs seen with GET long-polling.
+- OpenWrt init no longer enables procd respawn for the daemon; Telegram/API failures are handled inside the daemon instead.
+
 ## 0.5.4 - 2026-06-09
 
 - Из LuCI-деталей ASIC убраны мини-графики 24ч как малоинформативные.

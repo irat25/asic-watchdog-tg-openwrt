@@ -8,6 +8,7 @@ STATUS_FILE="$RUNDIR/status.json"
 STATUS_TMP="$RUNDIR/status.json.tmp"
 LOCK_FILE="$RUNDIR/monitor.lock"
 TG_OFFSET_FILE="$RUNDIR/telegram.offset"
+TG_POLL_LOCK_DIR="$RUNDIR/telegram-poll.lock"
 DAEMON_PID_FILE="$RUNDIR/daemon.pid"
 DAEMON_LOCK_DIR="$RUNDIR/daemon.lock"
 
@@ -523,27 +524,90 @@ telegram_timeout() {
 	cfg telegram_timeout 12
 }
 
+telegram_resolve_candidates() {
+	{
+		cat "$RUNDIR/telegram.resolve_ip" 2>/dev/null || true
+		cfg telegram_resolve_ip
+		cfg telegram_resolve_ips
+		printf '149.154.166.110 149.154.167.99 149.154.167.50 149.154.167.220 149.154.175.100\n'
+	} | tr ' ,' '\n\n' | awk 'NF && !seen[$1]++ { print }'
+}
+
+telegram_note_success() {
+	echo 0 >"$RUNDIR/telegram.fail_count"
+}
+
+telegram_note_failure() {
+	reason="$1"
+	current="$(cat "$RUNDIR/telegram.fail_count" 2>/dev/null || echo 0)"
+	current=$((current + 1))
+	echo "$current" >"$RUNDIR/telegram.fail_count"
+	threshold="$(cfg telegram_recover_failures 3)"
+	if [ "$current" -ge "$threshold" ]; then
+		log_limited telegram_recover 60 "telegram unhealthy failures=$current reason=$reason, probing API"
+		telegram_probe_api >/dev/null 2>&1 || true
+		echo 0 >"$RUNDIR/telegram.fail_count"
+	fi
+}
+
+telegram_probe_api() {
+	telegram_ready || return 1
+	resp="$(telegram_request "getMe" "" no_note)" || {
+		log_limited telegram_probe_failed 60 "telegram getMe probe failed"
+		return 1
+	}
+	case "$resp" in
+		*'"ok":true'*)
+			log_limited telegram_probe_ok 300 "telegram getMe probe ok"
+			return 0
+			;;
+		*)
+			log_limited telegram_probe_rejected 60 "telegram getMe probe rejected: $(printf '%s' "$resp" | cut -c1-180)"
+			return 1
+			;;
+	esac
+}
+
 telegram_request() {
 	method="$1"
 	post_data="$2"
+	note_mode="${3:-note}"
 	token="$(cfg bot_token)"
-	resolve_ip="$(cfg telegram_resolve_ip)"
 	url="https://api.telegram.org/bot$token/$method"
-	if [ -n "$resolve_ip" ] && command -v curl >/dev/null 2>&1; then
-		if [ -n "$post_data" ]; then
-			curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
-				--resolve "api.telegram.org:443:$resolve_ip" -d "$post_data" "$url" 2>/dev/null
-		else
-			curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
-				--resolve "api.telegram.org:443:$resolve_ip" "$url" 2>/dev/null
-		fi
-	else
-		if [ -n "$post_data" ]; then
-			wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "$url" 2>/dev/null
-		else
-			wget -T "$(telegram_timeout)" -qO- "$url" 2>/dev/null
-		fi
+	if command -v curl >/dev/null 2>&1; then
+		for resolve_ip in $(telegram_resolve_candidates); do
+			if [ -n "$post_data" ]; then
+				resp="$(curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
+					--resolve "api.telegram.org:443:$resolve_ip" -d "$post_data" "$url" 2>/dev/null)" && {
+					echo "$resolve_ip" >"$RUNDIR/telegram.resolve_ip"
+					[ "$note_mode" = "note" ] && telegram_note_success
+					printf '%s' "$resp"
+					return 0
+				}
+			else
+				resp="$(curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
+					--resolve "api.telegram.org:443:$resolve_ip" "$url" 2>/dev/null)" && {
+					echo "$resolve_ip" >"$RUNDIR/telegram.resolve_ip"
+					[ "$note_mode" = "note" ] && telegram_note_success
+					printf '%s' "$resp"
+					return 0
+				}
+			fi
+		done
 	fi
+	if [ -n "$post_data" ]; then
+		resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "$url" 2>/dev/null)" || {
+			[ "$note_mode" = "note" ] && telegram_note_failure "$method"
+			return 1
+		}
+	else
+		resp="$(wget -T "$(telegram_timeout)" -qO- "$url" 2>/dev/null)" || {
+			[ "$note_mode" = "note" ] && telegram_note_failure "$method"
+			return 1
+		}
+	fi
+	[ "$note_mode" = "note" ] && telegram_note_success
+	printf '%s' "$resp"
 }
 
 urlencode() {
@@ -583,7 +647,10 @@ telegram_send() {
 	}
 	case "$resp" in
 		*'"ok":true'*) return 0 ;;
-		*) log "telegram send rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
+		*)
+			telegram_note_failure send_rejected
+			log "telegram send rejected: $(printf '%s' "$resp" | cut -c1-220)"
+			;;
 	esac
 	return 1
 }
@@ -606,7 +673,10 @@ telegram_send_markup() {
 	}
 	case "$resp" in
 		*'"ok":true'*) return 0 ;;
-		*) log "telegram send markup rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
+		*)
+			telegram_note_failure send_markup_rejected
+			log "telegram send markup rejected: $(printf '%s' "$resp" | cut -c1-220)"
+			;;
 	esac
 	return 1
 }
@@ -630,7 +700,10 @@ telegram_edit_markup() {
 	}
 	case "$resp" in
 		*'"ok":true'*) return 0 ;;
-		*) log "telegram edit markup rejected: $(printf '%s' "$resp" | cut -c1-220)" ;;
+		*)
+			telegram_note_failure edit_markup_rejected
+			log "telegram edit markup rejected: $(printf '%s' "$resp" | cut -c1-220)"
+			;;
 	esac
 	return 1
 }
@@ -2137,14 +2210,60 @@ telegram_handle_command() {
 	esac
 }
 
+telegram_poll_unlock() {
+	rm -f "$TG_POLL_LOCK_DIR/pid" 2>/dev/null || true
+	rmdir "$TG_POLL_LOCK_DIR" 2>/dev/null || true
+}
+
+telegram_poll_lock() {
+	if mkdir "$TG_POLL_LOCK_DIR" 2>/dev/null; then
+		echo "$$ $(now)" >"$TG_POLL_LOCK_DIR/pid"
+		return 0
+	fi
+	lock_line="$(cat "$TG_POLL_LOCK_DIR/pid" 2>/dev/null || true)"
+	old_pid="$(printf '%s' "$lock_line" | awk '{ print $1 }')"
+	old_started="$(printf '%s' "$lock_line" | awk '{ print $2 }')"
+	current="$(now)"
+	lock_age=0
+	[ -n "$old_started" ] && lock_age=$((current - old_started))
+	lock_timeout=$(( $(telegram_timeout) + 10 ))
+	[ "$lock_timeout" -lt 20 ] && lock_timeout=20
+	if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null && [ "$lock_age" -lt "$lock_timeout" ]; then
+		log_limited telegram_poll_busy 30 "telegram poll already running age=${lock_age}s"
+		return 1
+	fi
+	log_limited telegram_poll_stale 60 "telegram poll lock stale pid=${old_pid:-unknown} age=${lock_age}s, clearing"
+	[ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+	rm -rf "$TG_POLL_LOCK_DIR" 2>/dev/null || true
+	if mkdir "$TG_POLL_LOCK_DIR" 2>/dev/null; then
+		echo "$$ $(now)" >"$TG_POLL_LOCK_DIR/pid"
+		return 0
+	fi
+	return 1
+}
+
 telegram_poll() {
 	telegram_ready || return 0
+	telegram_poll_lock || return 0
 	offset="$(cat "$TG_OFFSET_FILE" 2>/dev/null || echo 0)"
-	json="$(telegram_request "getUpdates?timeout=1&offset=$offset" "")" || {
+	json="$(telegram_request "getUpdates" "timeout=0&offset=$offset")" || {
 		log_limited telegram_poll_failed 60 "telegram poll failed"
+		telegram_poll_unlock
 		return 0
 	}
-	[ -n "$json" ] || return 0
+	if [ -z "$json" ]; then
+		telegram_poll_unlock
+		return 0
+	fi
+	case "$json" in
+		*'"ok":true'*) ;;
+		*)
+			telegram_note_failure poll_rejected
+			log_limited telegram_poll_rejected 60 "telegram poll rejected: $(printf '%s' "$json" | cut -c1-180)"
+			telegram_poll_unlock
+			return 0
+			;;
+	esac
 
 	printf '%s' "$json" | telegram_update_lines | while IFS= read -r item; do
 		update_id="$(printf '%s' "$item" | sed -n 's/.*"update_id":\([0-9][0-9]*\).*/\1/p')"
@@ -2190,30 +2309,59 @@ telegram_poll() {
 			log "telegram update ignored update_id=$update_id chat=${chat_id:-unknown} no_text_or_callback raw=$(printf '%s' "$item" | cut -c1-180)"
 		fi
 	done
+	telegram_poll_unlock
+}
+
+daemon_is_owner() {
+	owner="$(cat "$DAEMON_LOCK_DIR/pid" 2>/dev/null || true)"
+	[ "$owner" = "$$" ]
+}
+
+daemon_try_lock() {
+	if mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; then
+		echo "$$" >"$DAEMON_LOCK_DIR/pid"
+		return 0
+	fi
+	lock_pid="$(cat "$DAEMON_LOCK_DIR/pid" 2>/dev/null || true)"
+	if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+		return 1
+	fi
+	log "removing stale daemon lock pid=${lock_pid:-unknown}"
+	rm -rf "$DAEMON_LOCK_DIR" 2>/dev/null || true
+	if mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; then
+		echo "$$" >"$DAEMON_LOCK_DIR/pid"
+		return 0
+	fi
+	return 1
+}
+
+daemon_wait_for_lock() {
+	if ! daemon_try_lock; then
+		lock_pid="$(cat "$DAEMON_LOCK_DIR/pid" 2>/dev/null || true)"
+		log "daemon already running pid=${lock_pid:-unknown}, exiting duplicate"
+		exit 0
+	fi
+	echo "$$" >"$DAEMON_PID_FILE"
+	log "daemon started"
+}
+
+daemon_cleanup() {
+	trap - INT TERM EXIT
+	if daemon_is_owner; then
+		rm -rf "$DAEMON_LOCK_DIR" "$DAEMON_PID_FILE"
+	fi
+	exit 0
 }
 
 daemon() {
-	if mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; then
-		echo "$$" >"$DAEMON_LOCK_DIR/pid"
-	else
-		lock_pid="$(cat "$DAEMON_LOCK_DIR/pid" 2>/dev/null || true)"
-		if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-			log "daemon already running pid=$lock_pid, exiting duplicate"
-			exit 0
-		fi
-		log "removing stale daemon lock pid=${lock_pid:-unknown}"
-		rm -rf "$DAEMON_LOCK_DIR" 2>/dev/null || true
-		if ! mkdir "$DAEMON_LOCK_DIR" 2>/dev/null; then
-			log "daemon lock busy, exiting duplicate"
-			exit 0
-		fi
-		echo "$$" >"$DAEMON_LOCK_DIR/pid"
-	fi
-	trap 'rm -rf "$DAEMON_LOCK_DIR" "$DAEMON_PID_FILE"; exit 0' INT TERM EXIT
-	echo "$$" >"$DAEMON_PID_FILE"
-	log "daemon started"
+	trap 'daemon_cleanup' INT TERM EXIT
+	daemon_wait_for_lock
 	last_check=0
 	while true; do
+		if ! daemon_is_owner; then
+			log "daemon lost lock, exiting duplicate pid=$$"
+			exit 0
+		fi
 		if [ "$(cfg enabled 1)" = "1" ]; then
 			telegram_poll
 			telegram_heartbeat

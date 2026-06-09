@@ -145,6 +145,7 @@ Services -> ASIC Watchdog -> Chat / Group ID
 - Если `status.json` старше `status_stale_timeout` (по умолчанию 120 секунд), daemon принудительно запускает новый цикл проверки, а LuCI подсвечивает устаревший статус.
 - Telegram API вызовы ограничены `telegram_timeout` (по умолчанию 12 секунд), поэтому при проблемах DNS/прокси в логах быстро появляется понятная ошибка вместо долгого ожидания.
 - Если Podkop/sing-box отдаёт fake-IP для `api.telegram.org`, можно задать `telegram_resolve_ip` с реальным IP Telegram; watchdog будет использовать `curl --resolve` только для своих Telegram-запросов.
+- `telegram_resolve_ips` задаёт резервные IP Telegram, а `telegram_recover_failures` включает health-check `getMe` после серии ошибок чтения/отправки.
 - `telegram_heartbeat_interval` включает редкий самотест отправки в Telegram-группу; по умолчанию `0`, то есть выключен.
 - Для Telegram-уведомлений добавлен `alert_cooldown`, по умолчанию 3600 секунд.
 - Inline-кнопки используют короткие `callback_data` по индексу ASIC, чтобы не упереться в лимит Telegram.
