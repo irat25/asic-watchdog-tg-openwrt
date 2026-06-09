@@ -182,38 +182,6 @@ function detailGroup(title, items, extraClass) {
 	]);
 }
 
-function parseSeries(value) {
-	return String(value || '').split(',').map(function(v) {
-		var n = Number(v);
-		return isFinite(n) ? n : 0;
-	});
-}
-
-function sparkChart(title, series, formatter, tone) {
-	var values = parseSeries(series).filter(function(v) { return v > 0; });
-	if (!values.length)
-		return E('div', { 'class': 'asic-spark asic-spark-muted' }, [
-			E('div', { 'class': 'asic-spark-title' }, title),
-			E('div', { 'class': 'asic-spark-empty' }, 'нет данных')
-		]);
-
-	var min = Math.min.apply(Math, values);
-	var max = Math.max.apply(Math, values);
-	var spread = max - min;
-	var bars = values.map(function(v) {
-		var h = spread > 0 ? 18 + Math.round(((v - min) / spread) * 46) : 38;
-		return E('span', { 'style': 'height:' + h + 'px', 'title': formatter(v) });
-	});
-
-	return E('div', { 'class': 'asic-spark asic-spark-' + (tone || 'plain') }, [
-		E('div', { 'class': 'asic-spark-title' }, [
-			E('strong', {}, title),
-			E('span', {}, formatter(min) + ' ... ' + formatter(max))
-		]),
-		E('div', { 'class': 'asic-spark-bars' }, bars)
-	]);
-}
-
 function analysisPanel(s) {
 	var notes = [];
 	var hash = Number(s.hashrate || 0);
@@ -240,22 +208,8 @@ function analysisPanel(s) {
 	}));
 }
 
-function historyPanel(s) {
-	return E('section', { 'class': 'asic-detail-group asic-detail-group-wide' }, [
-		E('h4', {}, 'Графики 24ч'),
-		E('div', { 'class': 'asic-spark-grid' }, [
-			sparkChart('Хеш', s.hashrate_spark_24h, formatHash, 'plain'),
-			sparkChart('Температура', s.temp_spark_24h, function(v) { return Number(v).toFixed(1) + 'C'; }, 'hot'),
-			sparkChart('Битые шары', s.bad_spark_24h, function(v) { return Number(v).toFixed(2) + '%'; }, 'warn')
-		]),
-		E('div', { 'class': 'asic-analysis-title' }, 'Анализ'),
-		analysisPanel(s)
-	]);
-}
-
 function detailsPanel(s, fanTone, tempTone) {
 	return E('div', { 'class': 'asic-details-panel asic-details-collapsed' }, [
-		historyPanel(s),
 		detailGroup('Охлаждение', [
 			detail('Вентиляторы', s.fan_rpm, fanTone),
 			detail('Мин. RPM', s.fan_min || 0, fanTone),
@@ -286,6 +240,10 @@ function detailsPanel(s, fanTone, tempTone) {
 		detailGroup('Режим', [
 			detail('Autotune', s.autotune, 'plain'),
 			detail('API', s.api_ok === '1' ? 'ok' : 'down', s.api_ok === '1' ? 'plain' : 'bad')
+		]),
+		E('section', { 'class': 'asic-detail-group asic-detail-group-wide' }, [
+			E('h4', {}, 'Анализ'),
+			analysisPanel(s)
 		])
 	]);
 }
@@ -395,16 +353,6 @@ function css() {
 		.asic-detail dt{color:#64748b;font-size:12px}
 		.asic-detail dd{margin:0;font-weight:650;color:#0f172a;font-size:12px;word-break:break-word;overflow-wrap:anywhere}
 		.asic-detail-bad{background:#fee2e2;border-color:#fca5a5}.asic-detail-warn{background:#fef3c7;border-color:#fcd34d}
-		.asic-spark-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-		.asic-spark{border:1px solid #e2e8f0;border-radius:8px;background:#fff;padding:8px;min-width:0}
-		.asic-spark-title{display:flex;justify-content:space-between;gap:8px;align-items:center;color:#64748b;font-size:11px}
-		.asic-spark-title strong{font-size:12px;color:#0f172a}
-		.asic-spark-bars{height:68px;display:flex;align-items:flex-end;gap:2px;margin-top:8px}
-		.asic-spark-bars span{flex:1;min-width:2px;border-radius:3px 3px 0 0;background:#2563eb}
-		.asic-spark-hot .asic-spark-bars span{background:#dc2626}
-		.asic-spark-warn .asic-spark-bars span{background:#f59e0b}
-		.asic-spark-empty{height:68px;display:flex;align-items:center;color:#94a3b8;font-weight:650}
-		.asic-analysis-title{margin:8px 0 4px;font-size:12px;font-weight:800;color:#475569;text-transform:uppercase}
 		.asic-analysis{display:grid;gap:4px;color:#0f172a;font-weight:650;font-size:12px}
 		.asic-pool-list{display:flex;flex-direction:column;gap:7px}
 		.asic-pool-row{padding:6px 7px;border:1px solid #e2e8f0;border-radius:6px;background:rgba(255,255,255,.62)}
@@ -415,8 +363,8 @@ function css() {
 		.asic-actions{display:flex;gap:6px;flex-wrap:wrap}.asic-actions .btn{margin:0}
 		.asic-edit-hidden{display:none}
 		.asic-form-note{color:#64748b;font-size:12px;margin:4px 0 10px}
-		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd,.asic-analysis{color:#e5e7eb}.asic-detail-group h4,.asic-spark-title strong{color:#cbd5e1}.asic-pool-row,.asic-spark{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index,.asic-spark-title{color:#94a3b8}.asic-updated-stale{background:#450a0a;border-color:#991b1b;color:#fecaca}}
-		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}.asic-spark-grid{grid-template-columns:1fr}}
+		@media (prefers-color-scheme:dark){.asic-card{background:#1f2937;border-color:#374151}.asic-card span,.asic-sub{color:#9ca3af}.asic-metric,.asic-detail-group{background:#111827;border-color:#374151}.asic-metric-value,.asic-detail dd,.asic-analysis{color:#e5e7eb}.asic-detail-group h4{color:#cbd5e1}.asic-pool-row{background:#0f172a;border-color:#334155}.asic-pool-meta,.asic-pool-index{color:#94a3b8}.asic-updated-stale{background:#450a0a;border-color:#991b1b;color:#fecaca}}
+		@media (max-width:900px){.asic-details-panel{grid-template-columns:1fr}}
 		@media (max-width:720px){.asic-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.asic-actions .btn{width:100%;margin-top:4px}}
 	`);
 }
@@ -518,6 +466,7 @@ return view.extend({
 			field('Статус устарел, сек', input('status_stale_timeout', cfg.status_stale_timeout || '120')),
 			field('Таймаут Telegram, сек', input('telegram_timeout', cfg.telegram_timeout || '12')),
 			field('Telegram resolve IP', input('telegram_resolve_ip', cfg.telegram_resolve_ip || '')),
+			field('Telegram самотест, сек', input('telegram_heartbeat_interval', cfg.telegram_heartbeat_interval || '0')),
 			field('Повтор Telegram тревоги, сек', input('alert_cooldown', cfg.alert_cooldown || '3600')),
 			field('Макс. температура, C', input('max_temp', cfg.max_temp || '85')),
 			field('Мин. хешрейт', input('min_hashrate', cfg.min_hashrate || '1')),

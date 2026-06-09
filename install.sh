@@ -41,6 +41,7 @@ set_default monitor_timeout 180
 set_default status_stale_timeout 120
 set_default telegram_timeout 12
 set_default telegram_resolve_ip ''
+set_default telegram_heartbeat_interval 0
 uci commit asic_watchdog >/dev/null 2>&1 || true
 
 /etc/init.d/asic-watchdog enable >/dev/null 2>&1 || true

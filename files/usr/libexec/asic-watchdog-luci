@@ -66,6 +66,7 @@ config_json() {
 	jfield status_stale_timeout "$(uci -q get "$CONFIG.main.status_stale_timeout" 2>/dev/null || echo 120)"; printf ','
 	jfield telegram_timeout "$(uci -q get "$CONFIG.main.telegram_timeout" 2>/dev/null || echo 12)"; printf ','
 	jfield telegram_resolve_ip "$(uci -q get "$CONFIG.main.telegram_resolve_ip" 2>/dev/null || true)"; printf ','
+	jfield telegram_heartbeat_interval "$(uci -q get "$CONFIG.main.telegram_heartbeat_interval" 2>/dev/null || echo 0)"; printf ','
 	jfield alert_cooldown "$(uci -q get "$CONFIG.main.alert_cooldown" 2>/dev/null || echo 3600)"; printf ','
 	jfield max_temp "$(uci -q get "$CONFIG.main.max_temp" 2>/dev/null || echo 85)"; printf ','
 	jfield min_hashrate "$(uci -q get "$CONFIG.main.min_hashrate" 2>/dev/null || echo 1)"; printf ','
@@ -126,6 +127,7 @@ save_settings() {
 	uci set "$CONFIG.main.status_stale_timeout=$(param status_stale_timeout "$@")"
 	uci set "$CONFIG.main.telegram_timeout=$(param telegram_timeout "$@")"
 	uci set "$CONFIG.main.telegram_resolve_ip=$(param telegram_resolve_ip "$@")"
+	uci set "$CONFIG.main.telegram_heartbeat_interval=$(param telegram_heartbeat_interval "$@")"
 	uci set "$CONFIG.main.alert_cooldown=$(param alert_cooldown "$@")"
 	uci set "$CONFIG.main.max_temp=$(param max_temp "$@")"
 	uci set "$CONFIG.main.min_hashrate=$(param min_hashrate "$@")"

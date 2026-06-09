@@ -1397,7 +1397,7 @@ run_once_async() {
 }
 
 status_updated_ts() {
-	sed -n 's/.*"updated_ts":"\([0-9][0-9]*\)".*/\1/p' "$STATUS_FILE" 2>/dev/null | head -n 1
+	head -c 300 "$STATUS_FILE" 2>/dev/null | sed -n 's/.*"updated_ts":"\([0-9][0-9]*\)".*/\1/p'
 }
 
 status_age() {
@@ -1443,7 +1443,7 @@ miners_text() {
 }
 
 status_updated() {
-	status_json | sed -n 's/.*"updated":"\([^"]*\)".*/\1/p'
+	head -c 300 "$STATUS_FILE" 2>/dev/null | sed -n 's/.*"updated":"\([^"]*\)".*/\1/p'
 }
 
 miner_objects() {
@@ -1988,6 +1988,45 @@ ${camera_body}
 	fi
 }
 
+telegram_heartbeat() {
+	interval="$(cfg telegram_heartbeat_interval 0)"
+	[ "$interval" -gt 0 ] 2>/dev/null || return 0
+	telegram_enabled || return 0
+	current="$(now)"
+	file="$RUNDIR/telegram-heartbeat.last"
+	last="$(cat "$file" 2>/dev/null || echo 0)"
+	[ $((current - last)) -ge "$interval" ] || return 0
+	echo "$current" >"$file"
+
+	total=0
+	ok_count=0
+	issue_count=0
+	menu_file="$(mktemp "$RUNDIR/tg-heartbeat.XXXXXX" 2>/dev/null || printf '%s' "$RUNDIR/tg-heartbeat-$$")"
+	miner_objects >"$menu_file"
+	while IFS= read -r obj; do
+		[ -n "$obj" ] || continue
+		total=$((total + 1))
+		status="$(json_obj_get "$obj" status)"
+		if [ "$status" = "ok" ]; then
+			ok_count=$((ok_count + 1))
+		else
+			issue_count=$((issue_count + 1))
+		fi
+	done <"$menu_file"
+	rm -f "$menu_file"
+
+	updated="$(status_updated)"
+	age="$(status_age)"
+	msg="🟢 ASIC Watchdog · Telegram OK
+ASIC: ${ok_count}/${total} в норме · проблем ${issue_count}
+Статус: ${updated:-нет данных} · возраст ${age} сек"
+	if telegram_send "$msg" "" html; then
+		log "telegram heartbeat sent chat=$(cfg chat_id) miners=$total issues=$issue_count age=${age}s"
+	else
+		log "telegram heartbeat failed chat=$(cfg chat_id)"
+	fi
+}
+
 telegram_handle_callback() {
 	chat_id="$1"
 	data="$2"
@@ -2177,6 +2216,7 @@ daemon() {
 	while true; do
 		if [ "$(cfg enabled 1)" = "1" ]; then
 			telegram_poll
+			telegram_heartbeat
 			current="$(now)"
 			interval="$(cfg interval 60)"
 			stale_timeout="$(status_stale_timeout)"
