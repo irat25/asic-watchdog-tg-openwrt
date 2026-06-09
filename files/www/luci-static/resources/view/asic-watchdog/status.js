@@ -489,6 +489,7 @@ return view.extend({
 			field('Интервал, сек', input('interval', cfg.interval || '60')),
 			field('Таймаут проверки, сек', input('monitor_timeout', cfg.monitor_timeout || '180')),
 			field('Таймаут Telegram, сек', input('telegram_timeout', cfg.telegram_timeout || '12')),
+			field('Telegram resolve IP', input('telegram_resolve_ip', cfg.telegram_resolve_ip || '')),
 			field('Повтор Telegram тревоги, сек', input('alert_cooldown', cfg.alert_cooldown || '3600')),
 			field('Макс. температура, C', input('max_temp', cfg.max_temp || '85')),
 			field('Мин. хешрейт', input('min_hashrate', cfg.min_hashrate || '1')),

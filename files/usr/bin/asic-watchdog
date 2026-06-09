@@ -523,6 +523,29 @@ telegram_timeout() {
 	cfg telegram_timeout 12
 }
 
+telegram_request() {
+	method="$1"
+	post_data="$2"
+	token="$(cfg bot_token)"
+	resolve_ip="$(cfg telegram_resolve_ip)"
+	url="https://api.telegram.org/bot$token/$method"
+	if [ -n "$resolve_ip" ] && command -v curl >/dev/null 2>&1; then
+		if [ -n "$post_data" ]; then
+			curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
+				--resolve "api.telegram.org:443:$resolve_ip" -d "$post_data" "$url" 2>/dev/null
+		else
+			curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
+				--resolve "api.telegram.org:443:$resolve_ip" "$url" 2>/dev/null
+		fi
+	else
+		if [ -n "$post_data" ]; then
+			wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "$url" 2>/dev/null
+		else
+			wget -T "$(telegram_timeout)" -qO- "$url" 2>/dev/null
+		fi
+	fi
+}
+
 urlencode() {
 	awk '
 	BEGIN {
@@ -554,7 +577,7 @@ telegram_send() {
 	encoded="$(printf '%s' "$text" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+	resp="$(telegram_request sendMessage "$post_data")" || {
 		log "telegram send failed"
 		return 1
 	}
@@ -577,7 +600,7 @@ telegram_send_markup() {
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/sendMessage" 2>/dev/null)" || {
+	resp="$(telegram_request sendMessage "$post_data")" || {
 		log "telegram send markup failed"
 		return 1
 	}
@@ -601,7 +624,7 @@ telegram_edit_markup() {
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&message_id=$message_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "https://api.telegram.org/bot$token/editMessageText" 2>/dev/null)" || {
+	resp="$(telegram_request editMessageText "$post_data")" || {
 		log "telegram edit markup failed"
 		return 1
 	}
@@ -627,9 +650,8 @@ telegram_answer_callback() {
 	text="$2"
 	telegram_ready || return 0
 	[ -n "$callback_id" ] || return 0
-	token="$(cfg bot_token)"
 	encoded_text="$(printf '%s' "$text" | urlencode)"
-	wget -T "$(telegram_timeout)" -qO- --post-data="callback_query_id=$callback_id&text=$encoded_text" "https://api.telegram.org/bot$token/answerCallbackQuery" >/dev/null 2>&1 || true
+	telegram_request answerCallbackQuery "callback_query_id=$callback_id&text=$encoded_text" >/dev/null 2>&1 || true
 }
 
 status_badge() {
@@ -2033,10 +2055,8 @@ telegram_handle_command() {
 
 telegram_poll() {
 	telegram_ready || return 0
-	token="$(cfg bot_token)"
 	offset="$(cat "$TG_OFFSET_FILE" 2>/dev/null || echo 0)"
-	url="https://api.telegram.org/bot$token/getUpdates?timeout=1&offset=$offset"
-	json="$(wget -T "$(telegram_timeout)" -qO- "$url" 2>/dev/null)" || {
+	json="$(telegram_request "getUpdates?timeout=1&offset=$offset" "")" || {
 		log_limited telegram_poll_failed 60 "telegram poll failed"
 		return 0
 	}

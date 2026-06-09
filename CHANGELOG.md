@@ -2,6 +2,12 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.5.1 - 2026-06-09
+
+- Добавлена опция `telegram_resolve_ip`: если она задана и на роутере есть `curl`, Telegram API вызывается через `curl --resolve api.telegram.org:443:<ip>`.
+- Это позволяет watchdog отправлять Telegram-сообщения на роутерах с Podkop/sing-box fake-IP DNS, не меняя общие настройки Podkop.
+- Telegram polling, sendMessage, editMessageText и answerCallbackQuery переведены на общий helper `telegram_request`.
+
 ## 0.5.0 - 2026-06-09
 
 - История ASIC расширена: кроме хеша и шар теперь хранится температура, минимум вентилятора и процент битых шар за последние 48 часов в `/tmp/asic-watchdog/history-*.tsv`.
