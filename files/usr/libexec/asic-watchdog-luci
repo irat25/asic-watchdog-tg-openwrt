@@ -58,6 +58,19 @@ section_cfg() {
 	uci -q get "$CONFIG.$1.$2" 2>/dev/null || printf '%s' "${3:-}"
 }
 
+miner_duplicate_exists() {
+	want_ip="$1"
+	want_port="$2"
+	skip_sec="$3"
+	for existing_sec in $(miner_sections); do
+		[ -n "$skip_sec" ] && [ "$existing_sec" = "$skip_sec" ] && continue
+		[ "$(section_cfg "$existing_sec" ip)" = "$want_ip" ] || continue
+		[ "$(section_cfg "$existing_sec" api_port 4028)" = "$want_port" ] || continue
+		return 0
+	done
+	return 1
+}
+
 config_json() {
 	printf '{'
 	jfield enabled "$(uci -q get "$CONFIG.main.enabled" 2>/dev/null || echo 1)"; printf ','
@@ -68,7 +81,11 @@ config_json() {
 	jfield telegram_resolve_ip "$(uci -q get "$CONFIG.main.telegram_resolve_ip" 2>/dev/null || true)"; printf ','
 	jfield telegram_resolve_ips "$(uci -q get "$CONFIG.main.telegram_resolve_ips" 2>/dev/null || true)"; printf ','
 	jfield telegram_recover_failures "$(uci -q get "$CONFIG.main.telegram_recover_failures" 2>/dev/null || echo 3)"; printf ','
+	jfield telegram_max_candidates "$(uci -q get "$CONFIG.main.telegram_max_candidates" 2>/dev/null || echo 2)"; printf ','
+	jfield telegram_send_retries "$(uci -q get "$CONFIG.main.telegram_send_retries" 2>/dev/null || echo 2)"; printf ','
+	jfield telegram_probe_interval "$(uci -q get "$CONFIG.main.telegram_probe_interval" 2>/dev/null || echo 300)"; printf ','
 	jfield telegram_heartbeat_interval "$(uci -q get "$CONFIG.main.telegram_heartbeat_interval" 2>/dev/null || echo 0)"; printf ','
+	jfield debug_log "$(uci -q get "$CONFIG.main.debug_log" 2>/dev/null || echo 1)"; printf ','
 	jfield pool_test_duration "$(uci -q get "$CONFIG.main.pool_test_duration" 2>/dev/null || echo 300)"; printf ','
 	jfield pool_test_interval "$(uci -q get "$CONFIG.main.pool_test_interval" 2>/dev/null || echo 10)"; printf ','
 	jfield pool_test_timeout "$(uci -q get "$CONFIG.main.pool_test_timeout" 2>/dev/null || echo 5)"; printf ','
@@ -134,7 +151,11 @@ save_settings() {
 	uci set "$CONFIG.main.telegram_resolve_ip=$(param telegram_resolve_ip "$@")"
 	uci set "$CONFIG.main.telegram_resolve_ips=$(param telegram_resolve_ips "$@")"
 	uci set "$CONFIG.main.telegram_recover_failures=$(param telegram_recover_failures "$@")"
+	uci set "$CONFIG.main.telegram_max_candidates=$(param telegram_max_candidates "$@")"
+	uci set "$CONFIG.main.telegram_send_retries=$(param telegram_send_retries "$@")"
+	uci set "$CONFIG.main.telegram_probe_interval=$(param telegram_probe_interval "$@")"
 	uci set "$CONFIG.main.telegram_heartbeat_interval=$(param telegram_heartbeat_interval "$@")"
+	uci set "$CONFIG.main.debug_log=$(param debug_log "$@")"
 	uci set "$CONFIG.main.pool_test_duration=$(param pool_test_duration "$@")"
 	uci set "$CONFIG.main.pool_test_interval=$(param pool_test_interval "$@")"
 	uci set "$CONFIG.main.pool_test_timeout=$(param pool_test_timeout "$@")"
@@ -167,6 +188,10 @@ add_miner() {
 	[ -n "$name" ] || name="$ip"
 	api_port="$(param api_port "$@")"
 	[ -n "$api_port" ] || api_port="4028"
+	if miner_duplicate_exists "$ip" "$api_port" ""; then
+		fail "miner with this IP/API port already exists"
+		return
+	fi
 	model="$(param model "$@")"
 	[ -n "$model" ] || model="generic"
 	reboot_method="$(param reboot_method "$@")"
@@ -208,6 +233,10 @@ edit_miner() {
 	[ -n "$name" ] || name="$ip"
 	api_port="$(param api_port "$@")"
 	[ -n "$api_port" ] || api_port="4028"
+	if miner_duplicate_exists "$ip" "$api_port" "$sec"; then
+		fail "miner with this IP/API port already exists"
+		return
+	fi
 	model="$(param model "$@")"
 	[ -n "$model" ] || model="generic"
 	reboot_method="$(param reboot_method "$@")"
@@ -342,7 +371,12 @@ service_action() {
 			;;
 		telegram-test)
 			out="$($BIN telegram-test 2>&1)"
-			ok "$out"
+			rc=$?
+			if [ "$rc" -eq 0 ]; then
+				ok "$out"
+			else
+				fail "$out"
+			fi
 			;;
 		*)
 			fail "bad service command"

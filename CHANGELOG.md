@@ -2,6 +2,18 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.6.1 - 2026-06-10
+
+- Added detailed Telegram transport logging: method, Telegram IP, attempt number, duration, curl rc and short error text.
+- Added `debug_log`, `telegram_max_candidates` and `telegram_probe_interval` settings to keep diagnostics useful without blocking the daemon for minutes.
+- Added `telegram_send_retries` so status/menu messages retry after transient Telegram transport timeouts.
+- Added `telegram_resolve_ip=dns` mode to use normal DNS routing when direct Telegram IPs are unstable.
+- Status panel delivery now falls back to a plain message if Telegram inline keyboard delivery times out.
+- Added `telegram-status` CLI for testing the same status panel path used by `/status`.
+- When `curl` is available, Telegram requests no longer fall through to slow `wget` retries after all curl candidates fail.
+- The daemon now reaps duplicate `asic-watchdog daemon` processes that can keep old Telegram polling calls alive.
+- LuCI now returns a real error when Telegram test delivery fails, and blocks duplicate miners with the same IP/API port.
+
 ## 0.6.0 - 2026-06-10
 
 - Pool-test results are now sorted from best to worst by score.

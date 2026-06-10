@@ -43,7 +43,11 @@ set_default telegram_timeout 12
 set_default telegram_resolve_ip ''
 set_default telegram_resolve_ips ''
 set_default telegram_recover_failures 3
+set_default telegram_max_candidates 2
+set_default telegram_send_retries 2
+set_default telegram_probe_interval 300
 set_default telegram_heartbeat_interval 0
+set_default debug_log 1
 set_default pool_test_duration 300
 set_default pool_test_interval 10
 set_default pool_test_timeout 5

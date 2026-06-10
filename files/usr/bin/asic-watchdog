@@ -18,6 +18,14 @@ log() {
 	logger -t asic-watchdog "$*"
 }
 
+debug_enabled() {
+	[ "$(cfg debug_log 1)" = "1" ]
+}
+
+log_debug() {
+	debug_enabled && log "debug $*"
+}
+
 log_limited() {
 	key="$(safe_id "$1")"
 	interval="$2"
@@ -524,12 +532,32 @@ telegram_timeout() {
 	cfg telegram_timeout 12
 }
 
+telegram_max_candidates() {
+	value="$(cfg telegram_max_candidates 2)"
+	case "$value" in
+		''|*[!0-9]*) value=2 ;;
+	esac
+	[ "$value" -lt 1 ] && value=1
+	printf '%s' "$value"
+}
+
+telegram_send_retries() {
+	value="$(cfg telegram_send_retries 2)"
+	case "$value" in
+		''|*[!0-9]*) value=2 ;;
+	esac
+	[ "$value" -lt 1 ] && value=1
+	printf '%s' "$value"
+}
+
 telegram_resolve_candidates() {
+	primary="$(cfg telegram_resolve_ip)"
 	{
-		cat "$RUNDIR/telegram.resolve_ip" 2>/dev/null || true
-		cfg telegram_resolve_ip
+		[ -n "$primary" ] && printf '%s\n' "$primary"
+		[ "$primary" = "dns" ] || cat "$RUNDIR/telegram.resolve_ip" 2>/dev/null || true
 		cfg telegram_resolve_ips
 		printf '149.154.166.110 149.154.167.99 149.154.167.50 149.154.167.220 149.154.175.100\n'
+		printf 'dns\n'
 	} | tr ' ,' '\n\n' | awk 'NF && !seen[$1]++ { print }'
 }
 
@@ -545,7 +573,18 @@ telegram_note_failure() {
 	threshold="$(cfg telegram_recover_failures 3)"
 	if [ "$current" -ge "$threshold" ]; then
 		log_limited telegram_recover 60 "telegram unhealthy failures=$current reason=$reason, probing API"
-		telegram_probe_api >/dev/null 2>&1 || true
+		probe_interval="$(cfg telegram_probe_interval 300)"
+		case "$probe_interval" in
+			''|*[!0-9]*) probe_interval=300 ;;
+		esac
+		last_probe="$(cat "$RUNDIR/telegram-probe.last" 2>/dev/null || echo 0)"
+		now_probe="$(now)"
+		if [ $((now_probe - last_probe)) -ge "$probe_interval" ]; then
+			echo "$now_probe" >"$RUNDIR/telegram-probe.last"
+			telegram_probe_api >/dev/null 2>&1 || true
+		else
+			log_limited telegram_probe_skip 60 "telegram probe skipped age=$((now_probe - last_probe))s interval=${probe_interval}s"
+		fi
 		echo 0 >"$RUNDIR/telegram.fail_count"
 	fi
 }
@@ -574,40 +613,95 @@ telegram_request() {
 	note_mode="${3:-note}"
 	token="$(cfg bot_token)"
 	url="https://api.telegram.org/bot$token/$method"
+	timeout="$(telegram_timeout)"
+	max_candidates="$(telegram_max_candidates)"
+	started="$(now)"
 	if command -v curl >/dev/null 2>&1; then
+		tried=0
+		last_ip=""
+		last_rc=""
 		for resolve_ip in $(telegram_resolve_candidates); do
+			tried=$((tried + 1))
+			[ "$tried" -gt "$max_candidates" ] && break
+			attempt_started="$(now)"
+			err_file="$RUNDIR/telegram-curl-${method}-$$.err"
 			if [ -n "$post_data" ]; then
-				resp="$(curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
-					--resolve "api.telegram.org:443:$resolve_ip" -d "$post_data" "$url" 2>/dev/null)" && {
-					echo "$resolve_ip" >"$RUNDIR/telegram.resolve_ip"
-					[ "$note_mode" = "note" ] && telegram_note_success
-					printf '%s' "$resp"
-					return 0
-				}
+				if [ "$resolve_ip" = "dns" ]; then
+					resp="$(curl -sS --connect-timeout "$timeout" --max-time "$timeout" \
+						-d "$post_data" "$url" 2>"$err_file")"
+				else
+					resp="$(curl -sS --connect-timeout "$timeout" --max-time "$timeout" \
+						--resolve "api.telegram.org:443:$resolve_ip" -d "$post_data" "$url" 2>"$err_file")"
+				fi
+				rc=$?
 			else
-				resp="$(curl -sS --connect-timeout "$(telegram_timeout)" --max-time "$(telegram_timeout)" \
-					--resolve "api.telegram.org:443:$resolve_ip" "$url" 2>/dev/null)" && {
+				if [ "$resolve_ip" = "dns" ]; then
+					resp="$(curl -sS --connect-timeout "$timeout" --max-time "$timeout" \
+						"$url" 2>"$err_file")"
+				else
+					resp="$(curl -sS --connect-timeout "$timeout" --max-time "$timeout" \
+						--resolve "api.telegram.org:443:$resolve_ip" "$url" 2>"$err_file")"
+				fi
+				rc=$?
+			fi
+			duration=$(( $(now) - attempt_started ))
+			if [ "$rc" -eq 0 ]; then
+				rm -f "$err_file" 2>/dev/null || true
+				log_debug "telegram request ok method=$method ip=$resolve_ip try=$tried duration=${duration}s bytes=${#resp}"
+				case "$resp" in
+					*'"ok":false'*)
+						log_limited "telegram_${method}_api_false" 30 "telegram api rejected method=$method ip=$resolve_ip try=$tried duration=${duration}s response=$(printf '%s' "$resp" | cut -c1-180)"
+						;;
+				esac
 					echo "$resolve_ip" >"$RUNDIR/telegram.resolve_ip"
 					[ "$note_mode" = "note" ] && telegram_note_success
 					printf '%s' "$resp"
 					return 0
-				}
 			fi
+			last_ip="$resolve_ip"
+			last_rc="$rc"
+			err_text="$(cat "$err_file" 2>/dev/null | tr '\r\n' '  ' | cut -c1-160)"
+			rm -f "$err_file" 2>/dev/null || true
+			log_limited "telegram_${method}_${resolve_ip}_curl_fail" 30 "telegram curl failed method=$method ip=$resolve_ip try=$tried duration=${duration}s rc=$rc err=${err_text:-none}"
 		done
+		[ "$note_mode" = "note" ] && telegram_note_failure "$method"
+		log_limited "telegram_${method}_all_failed" 30 "telegram request failed method=$method tried=$tried max_candidates=$max_candidates timeout=${timeout}s last_ip=${last_ip:-none} last_rc=${last_rc:-none} total=$(( $(now) - started ))s"
+		return 1
 	fi
 	if [ -n "$post_data" ]; then
-		resp="$(wget -T "$(telegram_timeout)" -qO- --post-data="$post_data" "$url" 2>/dev/null)" || {
+		resp="$(wget -T "$timeout" -qO- --post-data="$post_data" "$url" 2>/dev/null)" || {
 			[ "$note_mode" = "note" ] && telegram_note_failure "$method"
+			log_limited "telegram_${method}_wget_fail" 30 "telegram wget failed method=$method timeout=${timeout}s total=$(( $(now) - started ))s"
 			return 1
 		}
 	else
-		resp="$(wget -T "$(telegram_timeout)" -qO- "$url" 2>/dev/null)" || {
+		resp="$(wget -T "$timeout" -qO- "$url" 2>/dev/null)" || {
 			[ "$note_mode" = "note" ] && telegram_note_failure "$method"
+			log_limited "telegram_${method}_wget_fail" 30 "telegram wget failed method=$method timeout=${timeout}s total=$(( $(now) - started ))s"
 			return 1
 		}
 	fi
+	log_debug "telegram request ok method=$method transport=wget duration=$(( $(now) - started ))s bytes=${#resp}"
 	[ "$note_mode" = "note" ] && telegram_note_success
 	printf '%s' "$resp"
+}
+
+telegram_request_retry() {
+	method="$1"
+	post_data="$2"
+	attempts="$(telegram_send_retries)"
+	attempt=1
+	while [ "$attempt" -le "$attempts" ]; do
+		resp="$(telegram_request "$method" "$post_data")" && {
+			printf '%s' "$resp"
+			return 0
+		}
+		[ "$attempt" -ge "$attempts" ] && break
+		log_limited "telegram_${method}_retry" 30 "telegram request retry method=$method next_attempt=$((attempt + 1)) max_attempts=$attempts"
+		sleep 2
+		attempt=$((attempt + 1))
+	done
+	return 1
 }
 
 urlencode() {
@@ -641,7 +735,7 @@ telegram_send() {
 	encoded="$(printf '%s' "$text" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(telegram_request sendMessage "$post_data")" || {
+	resp="$(telegram_request_retry sendMessage "$post_data")" || {
 		log "telegram send failed"
 		return 1
 	}
@@ -667,7 +761,7 @@ telegram_send_markup() {
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(telegram_request sendMessage "$post_data")" || {
+	resp="$(telegram_request_retry sendMessage "$post_data")" || {
 		log "telegram send markup failed"
 		return 1
 	}
@@ -694,7 +788,7 @@ telegram_edit_markup() {
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&message_id=$message_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
-	resp="$(telegram_request editMessageText "$post_data")" || {
+	resp="$(telegram_request_retry editMessageText "$post_data")" || {
 		log "telegram edit markup failed"
 		return 1
 	}
@@ -1618,15 +1712,22 @@ run_once() {
 	echo "$$ $(now)" >"$LOCK_FILE/pid"
 	STATUS_TMP="$RUNDIR/status-$$.json.tmp"
 	trap 'rm -f "$LOCK_FILE/pid" "$STATUS_TMP" 2>/dev/null; rmdir "$LOCK_FILE" 2>/dev/null' EXIT INT TERM
+	check_started="$(now)"
+	miner_count=0
+	camera_count=0
+	log_debug "check start pid=$$"
 	write_status_start
 	for sec in $(miner_sections); do
+		miner_count=$((miner_count + 1))
 		check_miner "$sec"
 	done
 	write_status_cameras_start
 	for sec in $(camera_sections); do
+		camera_count=$((camera_count + 1))
 		check_camera "$sec"
 	done
 	write_status_end
+	log_debug "check complete pid=$$ miners=$miner_count cameras=$camera_count duration=$(( $(now) - check_started ))s"
 	rm -f "$LOCK_FILE/pid" 2>/dev/null
 	rmdir "$LOCK_FILE" 2>/dev/null
 	trap - EXIT INT TERM
@@ -2216,6 +2317,11 @@ ${camera_body}
 			return 0
 		else
 			log "telegram menu edit failed chat=$chat_id message=$message_id"
+			if telegram_send "$text" "$chat_id" html; then
+				log "telegram menu fallback sent chat=$chat_id miners=$total issues=$issue_count cameras=$camera_total"
+				return 0
+			fi
+			log "telegram menu fallback failed chat=$chat_id"
 			return 1
 		fi
 	else
@@ -2224,6 +2330,11 @@ ${camera_body}
 			return 0
 		else
 			log "telegram menu send failed chat=$chat_id"
+			if telegram_send "$text" "$chat_id" html; then
+				log "telegram menu fallback sent chat=$chat_id miners=$total issues=$issue_count cameras=$camera_total"
+				return 0
+			fi
+			log "telegram menu fallback failed chat=$chat_id"
 			return 1
 		fi
 	fi
@@ -2251,9 +2362,9 @@ telegram_main_menu() {
 Выбери действие:"
 	markup='{"inline_keyboard":[[{"text":"📊 Статус","callback_data":"menu_status"},{"text":"🔄 Обновить","callback_data":"refresh"}],[{"text":"⛏ ASIC","callback_data":"menu_miners"},{"text":"₿ BTC пулы","callback_data":"pooltest:btc"}],[{"text":"ZEC пулы","callback_data":"pooltest:zec"},{"text":"🌐 Все пулы","callback_data":"pooltest:all"}],[{"text":"❓ Помощь","callback_data":"menu_help"}]]}'
 	if [ -n "$message_id" ]; then
-		telegram_edit_markup "$msg" "$markup" "$chat_id" "$message_id"
+		telegram_edit_markup "$msg" "$markup" "$chat_id" "$message_id" || telegram_send "$msg" "$chat_id"
 	else
-		telegram_send_markup "$msg" "$markup" "$chat_id"
+		telegram_send_markup "$msg" "$markup" "$chat_id" || telegram_send "$msg" "$chat_id"
 	fi
 }
 
@@ -2587,6 +2698,16 @@ daemon_wait_for_lock() {
 	log "daemon started"
 }
 
+daemon_reap_duplicates() {
+	owner="$(cat "$DAEMON_LOCK_DIR/pid" 2>/dev/null || true)"
+	[ -n "$owner" ] || owner="$$"
+	for pid in $(ps w | awk '/asic-watchdog\} \/bin\/sh \/usr\/bin\/asic-watchdog daemon/ { print $1 }'); do
+		[ "$pid" = "$owner" ] && continue
+		log_limited "daemon_duplicate_$pid" 60 "stopping duplicate daemon pid=$pid owner=$owner"
+		kill "$pid" 2>/dev/null || true
+	done
+}
+
 daemon_cleanup() {
 	trap - INT TERM EXIT
 	if daemon_is_owner; then
@@ -2598,6 +2719,7 @@ daemon_cleanup() {
 daemon() {
 	trap 'daemon_cleanup' INT TERM EXIT
 	daemon_wait_for_lock
+	daemon_reap_duplicates
 	last_check=0
 	while true; do
 		if ! daemon_is_owner; then
@@ -2605,6 +2727,7 @@ daemon() {
 			exit 0
 		fi
 		if [ "$(cfg enabled 1)" = "1" ]; then
+			daemon_reap_duplicates
 			telegram_poll
 			telegram_heartbeat
 			current="$(now)"
@@ -2635,6 +2758,7 @@ case "${1:-status-json}" in
 Router: $(cfg router_label "OpenWrt ASIC Watchdog")
 Chat: $(cfg chat_id)"; then echo "telegram test sent to $(cfg chat_id)"; else echo "telegram test failed for $(cfg chat_id)"; exit 1; fi ;;
 	telegram-menu) if telegram_main_menu "$(cfg chat_id)"; then echo "telegram menu sent to $(cfg chat_id)"; else echo "telegram menu failed for $(cfg chat_id)"; exit 1; fi ;;
+	telegram-status) if telegram_status_menu "$(cfg chat_id)"; then echo "telegram status sent to $(cfg chat_id)"; else echo "telegram status failed for $(cfg chat_id)"; exit 1; fi ;;
 	telegram-poll) telegram_poll; echo "telegram poll done" ;;
 	reboot) shift; reboot_miner "$1" ;;
 	*) echo "Использование: $0 daemon|run-once|status-json|status-text|miners|telegram-test|telegram-menu|telegram-poll|reboot <имя|ip>" >&2; exit 1 ;;
