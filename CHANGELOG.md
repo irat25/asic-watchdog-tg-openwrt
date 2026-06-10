@@ -2,6 +2,12 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.5.9 - 2026-06-10
+
+- Changed `/pooltest btc|zec|all 300 10`: `300` is now the total test budget, not 300 seconds for every pool address.
+- Telegram start message now says `общий лимит`, so the expected return time is clear.
+- Existing long-running pool tests are stopped during install by the package process cleanup.
+
 ## 0.5.8 - 2026-06-10
 
 - Переведены на русский главное Telegram-меню, ответы на кнопки, помощь и вывод теста пулов.

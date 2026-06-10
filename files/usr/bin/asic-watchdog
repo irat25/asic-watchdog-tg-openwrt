@@ -902,23 +902,30 @@ pool_test() {
 	duration="${2:-$(cfg pool_test_duration 300)}"
 	interval="${3:-$(cfg pool_test_interval 10)}"
 	timeout="${4:-$(cfg pool_test_timeout 5)}"
-	case "$coin" in btc|zec|all) ;; *) echo "Формат: pool-test btc|zec|all [секунд_на_адрес] [интервал_сек]"; return 1 ;; esac
+	case "$coin" in btc|zec|all) ;; *) echo "Формат: pool-test btc|zec|all [общих_секунд] [интервал_сек]"; return 1 ;; esac
 	duration="$(num_or_zero "$duration")"
 	interval="$(num_or_zero "$interval")"
 	timeout="$(num_or_zero "$timeout")"
 	[ "$duration" -ge 5 ] 2>/dev/null || duration=5
 	[ "$interval" -ge 1 ] 2>/dev/null || interval=1
 	[ "$timeout" -ge 1 ] 2>/dev/null || timeout=5
+	target_count="$(pool_test_targets "$coin" | awk 'NF { n++ } END { print n + 0 }')"
+	[ "$target_count" -gt 0 ] 2>/dev/null || {
+		echo "Нет адресов пулов для теста: $coin"
+		return 1
+	}
+	per_target=$((duration / target_count))
+	[ "$per_target" -ge 5 ] 2>/dev/null || per_target=5
 	tmp="$RUNDIR/pool-test-$$.txt"
 	{
-		printf 'Тест пулов %s: %sс на адрес, интервал %sс, timeout %sс\n' "$coin" "$duration" "$interval" "$timeout"
+		printf 'Тест пулов %s: общий лимит %sс, адресов %s, примерно %sс на адрес, интервал %sс, timeout %sс\n' "$coin" "$duration" "$target_count" "$per_target" "$interval" "$timeout"
 		printf 'Проверяется только TCP-доступ. Настройки ASIC не меняются.\n'
 	} >"$tmp"
 	best_score=""
 	best_line=""
 	pool_test_targets "$coin" | while read -r tcoin host port label; do
 		[ -n "$host" ] || continue
-		line="$(pool_test_one "$tcoin" "$host" "$port" "$label" "$duration" "$interval" "$timeout")"
+		line="$(pool_test_one "$tcoin" "$host" "$port" "$label" "$per_target" "$interval" "$timeout")"
 		printf '%s\n' "$line" >>"$tmp"
 	done
 	while IFS= read -r line; do
@@ -2242,7 +2249,7 @@ telegram_pooltest_async() {
 	coin="$2"
 	duration="${3:-$(cfg pool_test_duration 300)}"
 	interval="${4:-$(cfg pool_test_interval 10)}"
-	telegram_send "Тест пулов запущен: ${coin}, ${duration}с на адрес, интервал ${interval}с. Итог пришлю сюда." "$chat_id"
+	telegram_send "Тест пулов запущен: ${coin}, общий лимит ${duration}с, интервал ${interval}с. Итог пришлю сюда." "$chat_id"
 	(
 		out="$(pool_test "$coin" "$duration" "$interval" 2>&1)"
 		telegram_send "$out" "$chat_id"
