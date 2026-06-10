@@ -6,16 +6,16 @@
 
 Репозиторий: <https://github.com/irat25/asic-watchdog-tg-openwrt>
 
-## Telegram menu
+## Telegram-меню
 
-Use `/menu` or `/start` in the configured Telegram group/channel to open the main inline menu.
+Напиши `/menu` или `/start` в настроенной Telegram-группе/канале, чтобы открыть главное меню с кнопками.
 
-Buttons:
+Кнопки:
 
-- `Status` / `Refresh` - open or refresh the ASIC status panel.
-- `ASIC list` - same status panel with ASIC buttons.
-- `BTC pools` / `ZEC pools` / `All pools` - start ViaBTC pool tests in the background.
-- `Help` - show command list.
+- `Статус` / `Обновить` - открыть или обновить панель ASIC.
+- `ASIC` - список ASIC с кнопками деталей и перезагрузки.
+- `BTC пулы` / `ZEC пулы` / `Все пулы` - запустить тест пулов ViaBTC в фоне.
+- `Помощь` - показать список команд.
 
 CLI:
 
@@ -23,14 +23,14 @@ CLI:
 /usr/bin/asic-watchdog telegram-menu
 ```
 
-## ViaBTC pool test
+## Тест пулов ViaBTC
 
-Official ViaBTC pool list checked on 2026-06-10:
+Официальный список пулов ViaBTC проверен 2026-06-10:
 
-- BTC Europe: `btc.powhashing.com:3333`, failover `:443`
-- ZEC Europe: `zec.powhashing.com:3002`
-- BTC Global: `btc.viabtc.io`, `btc.viabtc.cc`, `btc.viabtc.top`
-- ZEC Global: `mining.viabtc.io`, `mining.viabtc.top`
+- BTC Европа: `btc.powhashing.com:3333`, резерв `:443`
+- ZEC Европа: `zec.powhashing.com:3002`
+- BTC глобальные: `btc.viabtc.io`, `btc.viabtc.cc`, `btc.viabtc.top`
+- ZEC глобальные: `mining.viabtc.io`, `mining.viabtc.top`
 
 CLI:
 
@@ -48,7 +48,7 @@ Telegram:
 /pooltest all 60 10
 ```
 
-The test measures TCP connect success and latency only. It does not change ASIC pool settings automatically.
+Тест измеряет только успешность TCP-подключения и задержку. Настройки пулов на ASIC автоматически не меняются.
 
 ## Что умеет
 

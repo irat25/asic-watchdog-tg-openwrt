@@ -791,25 +791,25 @@ pool_test_targets() {
 	case "$coin" in
 		btc)
 			cat <<'EOF'
-BTC btc.viabtc.io 3333 Global
-BTC btc.viabtc.io 443 Global-failover
-BTC btc.viabtc.cc 3333 Global
-BTC btc.viabtc.cc 443 Global-failover
-BTC btc.viabtc.top 3333 Global
-BTC btc.viabtc.top 443 Global-failover
-BTC btc.powhashing.com 3333 Europe
-BTC btc.powhashing.com 443 Europe-failover
+BTC btc.viabtc.io 3333 Глобальный
+BTC btc.viabtc.io 443 Глобальный-резерв
+BTC btc.viabtc.cc 3333 Глобальный
+BTC btc.viabtc.cc 443 Глобальный-резерв
+BTC btc.viabtc.top 3333 Глобальный
+BTC btc.viabtc.top 443 Глобальный-резерв
+BTC btc.powhashing.com 3333 Европа
+BTC btc.powhashing.com 443 Европа-резерв
 BTC btc-ssl.viabtc.io 551 SSL
-BTC btc-ssl.powhashing.com 3333 Europe-SSL
+BTC btc-ssl.powhashing.com 3333 Европа-SSL
 EOF
 			;;
 		zec)
 			cat <<'EOF'
-ZEC mining.viabtc.io 3002 Global
-ZEC mining.viabtc.io 302 Global-failover
-ZEC mining.viabtc.top 3002 Global
-ZEC mining.viabtc.top 302 Global-failover
-ZEC zec.powhashing.com 3002 Europe
+ZEC mining.viabtc.io 3002 Глобальный
+ZEC mining.viabtc.io 302 Глобальный-резерв
+ZEC mining.viabtc.top 3002 Глобальный
+ZEC mining.viabtc.top 302 Глобальный-резерв
+ZEC zec.powhashing.com 3002 Европа
 ZEC hash-ssl.viabtc.top 3002 SSL
 EOF
 			;;
@@ -891,9 +891,9 @@ pool_test_one() {
 	if [ "$ok" -gt 0 ]; then
 		avg="$(awk -v s="$sum" -v n="$ok" 'BEGIN { printf "%.3f", s / n }')"
 		score="$(awk -v ok="$ok" -v total="$total" -v avg="$avg" 'BEGIN { printf "%.3f", (ok / total * 1000) - avg }')"
-		printf '%s %s:%s %s ok=%s/%s avg=%ss best=%ss score=%s\n' "$coin" "$host" "$port" "$label" "$ok" "$total" "$avg" "$best" "$score"
+		printf '%s %s:%s %s · успешно %s/%s · среднее %sс · лучше %sс · оценка=%s\n' "$coin" "$host" "$port" "$label" "$ok" "$total" "$avg" "$best" "$score"
 	else
-		printf '%s %s:%s %s ok=0/%s avg=- best=- score=0\n' "$coin" "$host" "$port" "$label" "$total"
+		printf '%s %s:%s %s · успешно 0/%s · среднее - · лучше - · оценка=0\n' "$coin" "$host" "$port" "$label" "$total"
 	fi
 }
 
@@ -902,7 +902,7 @@ pool_test() {
 	duration="${2:-$(cfg pool_test_duration 300)}"
 	interval="${3:-$(cfg pool_test_interval 10)}"
 	timeout="${4:-$(cfg pool_test_timeout 5)}"
-	case "$coin" in btc|zec|all) ;; *) echo "Use: pool-test btc|zec|all [duration_sec] [interval_sec]"; return 1 ;; esac
+	case "$coin" in btc|zec|all) ;; *) echo "Формат: pool-test btc|zec|all [секунд_на_адрес] [интервал_сек]"; return 1 ;; esac
 	duration="$(num_or_zero "$duration")"
 	interval="$(num_or_zero "$interval")"
 	timeout="$(num_or_zero "$timeout")"
@@ -911,8 +911,8 @@ pool_test() {
 	[ "$timeout" -ge 1 ] 2>/dev/null || timeout=5
 	tmp="$RUNDIR/pool-test-$$.txt"
 	{
-		printf 'Pool test %s: %ss each, interval %ss, timeout %ss\n' "$coin" "$duration" "$interval" "$timeout"
-		printf 'Only TCP connect is tested; ASIC pool settings are not changed.\n'
+		printf 'Тест пулов %s: %sс на адрес, интервал %sс, timeout %sс\n' "$coin" "$duration" "$interval" "$timeout"
+		printf 'Проверяется только TCP-доступ. Настройки ASIC не меняются.\n'
 	} >"$tmp"
 	best_score=""
 	best_line=""
@@ -922,14 +922,14 @@ pool_test() {
 		printf '%s\n' "$line" >>"$tmp"
 	done
 	while IFS= read -r line; do
-		score="$(printf '%s' "$line" | sed -n 's/.* score=\([0-9.][0-9.]*\).*/\1/p')"
+		score="$(printf '%s' "$line" | sed -n 's/.* оценка=\([0-9.][0-9.]*\).*/\1/p')"
 		[ -n "$score" ] || continue
 		if [ -z "$best_score" ] || awk -v a="$score" -v b="$best_score" 'BEGIN { exit !(a > b) }'; then
 			best_score="$score"
 			best_line="$line"
 		fi
 	done <"$tmp"
-	[ -n "$best_line" ] && printf 'Best: %s\n' "$best_line" >>"$tmp"
+	[ -n "$best_line" ] && printf 'Лучший: %s\n' "$best_line" >>"$tmp"
 	cat "$tmp"
 	rm -f "$tmp"
 }
@@ -2242,7 +2242,7 @@ telegram_pooltest_async() {
 	coin="$2"
 	duration="${3:-$(cfg pool_test_duration 300)}"
 	interval="${4:-$(cfg pool_test_interval 10)}"
-	telegram_send "Pool test started: ${coin}, ${duration}s each, interval ${interval}s. Result will be sent here." "$chat_id"
+	telegram_send "Тест пулов запущен: ${coin}, ${duration}с на адрес, интервал ${interval}с. Итог пришлю сюда." "$chat_id"
 	(
 		out="$(pool_test "$coin" "$duration" "$interval" 2>&1)"
 		telegram_send "$out" "$chat_id"
@@ -2300,21 +2300,21 @@ telegram_handle_callback() {
 	}
 	case "$data" in
 		menu)
-			telegram_answer_callback "$callback_id" "Menu"
+			telegram_answer_callback "$callback_id" "Меню"
 			telegram_main_menu "$chat_id" "$message_id"
 			;;
 		menu_status|menu_miners)
-			telegram_answer_callback "$callback_id" "Opening status"
+			telegram_answer_callback "$callback_id" "Открываю статус"
 			telegram_status_menu "$chat_id" "$message_id"
 			;;
 		menu_help)
-			telegram_answer_callback "$callback_id" "Help"
+			telegram_answer_callback "$callback_id" "Помощь"
 			markup='{"inline_keyboard":[[{"text":"⬅️ Меню","callback_data":"menu"},{"text":"📊 Статус","callback_data":"menu_status"}]]}'
 			telegram_edit_markup "$(telegram_help_text)" "$markup" "$chat_id" "$message_id"
 			;;
 		pooltest:*)
 			coin="${data#pooltest:}"
-			telegram_answer_callback "$callback_id" "Starting $coin test"
+			telegram_answer_callback "$callback_id" "Запускаю тест $coin"
 			telegram_pooltest_async "$chat_id" "$coin"
 			;;
 		refresh)
