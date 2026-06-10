@@ -2209,6 +2209,46 @@ ${camera_body}
 	fi
 }
 
+telegram_help_text() {
+	cat <<'EOF'
+ASIC Watchdog
+
+/menu - главное меню
+/status - панель статуса с кнопками
+/miners - список ASIC
+/pooltest btc 300 10 - тест BTC пулов ViaBTC
+/pooltest zec 300 10 - тест ZEC пулов ViaBTC
+/reboot имя_или_ip - ручная перезагрузка ASIC
+/chatid - показать ID группы
+EOF
+}
+
+telegram_main_menu() {
+	chat_id="$1"
+	message_id="$2"
+	msg="ASIC Watchdog
+
+Выбери действие:"
+	markup='{"inline_keyboard":[[{"text":"📊 Статус","callback_data":"menu_status"},{"text":"🔄 Обновить","callback_data":"refresh"}],[{"text":"⛏ ASIC","callback_data":"menu_miners"},{"text":"₿ BTC пулы","callback_data":"pooltest:btc"}],[{"text":"ZEC пулы","callback_data":"pooltest:zec"},{"text":"🌐 Все пулы","callback_data":"pooltest:all"}],[{"text":"❓ Помощь","callback_data":"menu_help"}]]}'
+	if [ -n "$message_id" ]; then
+		telegram_edit_markup "$msg" "$markup" "$chat_id" "$message_id"
+	else
+		telegram_send_markup "$msg" "$markup" "$chat_id"
+	fi
+}
+
+telegram_pooltest_async() {
+	chat_id="$1"
+	coin="$2"
+	duration="${3:-$(cfg pool_test_duration 300)}"
+	interval="${4:-$(cfg pool_test_interval 10)}"
+	telegram_send "Pool test started: ${coin}, ${duration}s each, interval ${interval}s. Result will be sent here." "$chat_id"
+	(
+		out="$(pool_test "$coin" "$duration" "$interval" 2>&1)"
+		telegram_send "$out" "$chat_id"
+	) >/dev/null 2>&1 &
+}
+
 telegram_heartbeat() {
 	interval="$(cfg telegram_heartbeat_interval 0)"
 	[ "$interval" -gt 0 ] 2>/dev/null || return 0
@@ -2259,6 +2299,24 @@ telegram_handle_callback() {
 		return 0
 	}
 	case "$data" in
+		menu)
+			telegram_answer_callback "$callback_id" "Menu"
+			telegram_main_menu "$chat_id" "$message_id"
+			;;
+		menu_status|menu_miners)
+			telegram_answer_callback "$callback_id" "Opening status"
+			telegram_status_menu "$chat_id" "$message_id"
+			;;
+		menu_help)
+			telegram_answer_callback "$callback_id" "Help"
+			markup='{"inline_keyboard":[[{"text":"⬅️ Меню","callback_data":"menu"},{"text":"📊 Статус","callback_data":"menu_status"}]]}'
+			telegram_edit_markup "$(telegram_help_text)" "$markup" "$chat_id" "$message_id"
+			;;
+		pooltest:*)
+			coin="${data#pooltest:}"
+			telegram_answer_callback "$callback_id" "Starting $coin test"
+			telegram_pooltest_async "$chat_id" "$coin"
+			;;
 		refresh)
 			telegram_answer_callback "$callback_id" "Обновляю..."
 			telegram_status_menu "$chat_id" "$message_id"
@@ -2334,6 +2392,9 @@ telegram_handle_command() {
 	log "telegram command chat=$chat_id cmd=$cmd_base"
 
 	case "$cmd_base" in
+		menu)
+			telegram_main_menu "$chat_id"
+			;;
 		status)
 			telegram_status_menu "$chat_id"
 			;;
@@ -2354,13 +2415,15 @@ telegram_handle_command() {
 			coin="${1:-all}"
 			duration="${2:-$(cfg pool_test_duration 300)}"
 			interval="${3:-$(cfg pool_test_interval 10)}"
-			telegram_send "Pool test started: ${coin}, ${duration}s each, interval ${interval}s. Result will be sent here." "$chat_id"
-			(
-				out="$(pool_test "$coin" "$duration" "$interval" 2>&1)"
-				telegram_send "$out" "$chat_id"
-			) >/dev/null 2>&1 &
+			telegram_pooltest_async "$chat_id" "$coin" "$duration" "$interval"
 			;;
-		help|start)
+		help)
+			telegram_send "$(telegram_help_text)" "$chat_id"
+			;;
+		start)
+			telegram_main_menu "$chat_id"
+			;;
+		help_legacy_disabled)
 			telegram_send "/status - мониторинг с кнопками
 /miners - тот же список ASIC
 /reboot имя_или_ip - перезагрузка вручную
@@ -2551,7 +2614,7 @@ case "${1:-status-json}" in
 	telegram-test) if telegram_send "[TEST] ASIC Watchdog Telegram delivery check
 Router: $(cfg router_label "OpenWrt ASIC Watchdog")
 Chat: $(cfg chat_id)"; then echo "telegram test sent to $(cfg chat_id)"; else echo "telegram test failed for $(cfg chat_id)"; exit 1; fi ;;
-	telegram-menu) run_once; if telegram_status_menu "$(cfg chat_id)"; then echo "telegram menu sent to $(cfg chat_id)"; else echo "telegram menu failed for $(cfg chat_id)"; exit 1; fi ;;
+	telegram-menu) if telegram_main_menu "$(cfg chat_id)"; then echo "telegram menu sent to $(cfg chat_id)"; else echo "telegram menu failed for $(cfg chat_id)"; exit 1; fi ;;
 	telegram-poll) telegram_poll; echo "telegram poll done" ;;
 	reboot) shift; reboot_miner "$1" ;;
 	*) echo "Использование: $0 daemon|run-once|status-json|status-text|miners|telegram-test|telegram-menu|telegram-poll|reboot <имя|ip>" >&2; exit 1 ;;

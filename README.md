@@ -6,6 +6,23 @@
 
 Репозиторий: <https://github.com/irat25/asic-watchdog-tg-openwrt>
 
+## Telegram menu
+
+Use `/menu` or `/start` in the configured Telegram group/channel to open the main inline menu.
+
+Buttons:
+
+- `Status` / `Refresh` - open or refresh the ASIC status panel.
+- `ASIC list` - same status panel with ASIC buttons.
+- `BTC pools` / `ZEC pools` / `All pools` - start ViaBTC pool tests in the background.
+- `Help` - show command list.
+
+CLI:
+
+```sh
+/usr/bin/asic-watchdog telegram-menu
+```
+
 ## ViaBTC pool test
 
 Official ViaBTC pool list checked on 2026-06-10:

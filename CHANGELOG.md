@@ -2,6 +2,12 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.5.7 - 2026-06-10
+
+- Added Telegram main menu: `/menu` and `/start` now show buttons for Status, Refresh, ASIC list, BTC/ZEC/all pool tests, and Help.
+- Added callback actions for pool tests, so BTC/ZEC ViaBTC tests can be started from buttons.
+- `telegram-menu` CLI now sends the main function menu instead of only the status panel.
+
 ## 0.5.6 - 2026-06-10
 
 - Added ViaBTC BTC/ZEC pool access test: `pool-test btc|zec|all [duration_sec] [interval_sec] [timeout_sec]`.
