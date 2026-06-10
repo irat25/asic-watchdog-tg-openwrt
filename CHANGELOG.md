@@ -2,6 +2,14 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.5.6 - 2026-06-10
+
+- Added ViaBTC BTC/ZEC pool access test: `pool-test btc|zec|all [duration_sec] [interval_sec] [timeout_sec]`.
+- Added Telegram command `/pooltest btc|zec|all 300 10`; long tests run in background and send the result back to the group.
+- Added official ViaBTC BTC/ZEC targets, including `btc.powhashing.com` and `zec.powhashing.com`.
+- Added LuCI/UCI settings: `pool_test_duration`, `pool_test_interval`, `pool_test_timeout`.
+- The pool test checks TCP connect latency and success rate only; it does not switch ASIC pool settings automatically.
+
 ## 0.5.5 - 2026-06-09
 
 - Telegram-запросы теперь перебирают несколько реальных IP `api.telegram.org` через `curl --resolve` и запоминают последний рабочий IP.

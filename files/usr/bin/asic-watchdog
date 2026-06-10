@@ -786,6 +786,154 @@ format_ping_alert() {
 	esac
 }
 
+pool_test_targets() {
+	coin="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+	case "$coin" in
+		btc)
+			cat <<'EOF'
+BTC btc.viabtc.io 3333 Global
+BTC btc.viabtc.io 443 Global-failover
+BTC btc.viabtc.cc 3333 Global
+BTC btc.viabtc.cc 443 Global-failover
+BTC btc.viabtc.top 3333 Global
+BTC btc.viabtc.top 443 Global-failover
+BTC btc.powhashing.com 3333 Europe
+BTC btc.powhashing.com 443 Europe-failover
+BTC btc-ssl.viabtc.io 551 SSL
+BTC btc-ssl.powhashing.com 3333 Europe-SSL
+EOF
+			;;
+		zec)
+			cat <<'EOF'
+ZEC mining.viabtc.io 3002 Global
+ZEC mining.viabtc.io 302 Global-failover
+ZEC mining.viabtc.top 3002 Global
+ZEC mining.viabtc.top 302 Global-failover
+ZEC zec.powhashing.com 3002 Europe
+ZEC hash-ssl.viabtc.top 3002 SSL
+EOF
+			;;
+		all)
+			pool_test_targets btc
+			pool_test_targets zec
+			;;
+	esac
+}
+
+pool_probe_tcp() {
+	host="$1"
+	port="$2"
+	timeout="${3:-5}"
+	if command -v curl >/dev/null 2>&1; then
+		t="$(curl -sS -o /dev/null --connect-timeout "$timeout" --max-time "$timeout" \
+			-w '%{time_connect}' "http://$host:$port" 2>/dev/null || true)"
+		if printf '%s' "$t" | awk '{ exit !(($1 + 0) > 0) }'; then
+			printf '%s\n' "$t"
+			return 0
+		fi
+	fi
+	start="$(now)"
+	( : | nc "$host" "$port" >/dev/null 2>&1 ) &
+	pid="$!"
+	waited=0
+	while kill -0 "$pid" 2>/dev/null; do
+		[ "$waited" -ge "$timeout" ] && {
+			kill "$pid" 2>/dev/null || true
+			wait "$pid" 2>/dev/null || true
+			printf 'fail\n'
+			return 1
+		}
+		sleep 1
+		waited=$((waited + 1))
+	done
+	wait "$pid" 2>/dev/null || {
+		printf 'fail\n'
+		return 1
+	}
+	ping_ms="$(ping -c 1 -W "$timeout" "$host" 2>/dev/null | awk -F'time=' '/time=/{ split($2,a," "); print a[1]; ok=1; exit } END { if (!ok) print "" }')"
+	if [ -n "$ping_ms" ]; then
+		awk -v ms="$ping_ms" 'BEGIN { printf "%.3f\n", ms / 1000 }'
+		return 0
+	fi
+	elapsed=$(( $(now) - start ))
+	[ "$elapsed" -le 0 ] && elapsed=1
+	printf '%s.000\n' "$elapsed"
+}
+
+pool_test_one() {
+	coin="$1"
+	host="$2"
+	port="$3"
+	label="$4"
+	duration="$5"
+	interval="$6"
+	timeout="$7"
+	end=$(( $(now) + duration ))
+	total=0
+	ok=0
+	sum="0"
+	best=""
+	while [ "$(now)" -lt "$end" ]; do
+		total=$((total + 1))
+		result="$(pool_probe_tcp "$host" "$port" "$timeout")"
+		case "$result" in
+			fail|'') ;;
+			*)
+				ok=$((ok + 1))
+				sum="$(awk -v a="$sum" -v b="$result" 'BEGIN { printf "%.3f", a + b }')"
+				if [ -z "$best" ] || awk -v a="$result" -v b="$best" 'BEGIN { exit !(a < b) }'; then
+					best="$result"
+				fi
+				;;
+		esac
+		[ "$(now)" -lt "$end" ] && sleep "$interval"
+	done
+	if [ "$ok" -gt 0 ]; then
+		avg="$(awk -v s="$sum" -v n="$ok" 'BEGIN { printf "%.3f", s / n }')"
+		score="$(awk -v ok="$ok" -v total="$total" -v avg="$avg" 'BEGIN { printf "%.3f", (ok / total * 1000) - avg }')"
+		printf '%s %s:%s %s ok=%s/%s avg=%ss best=%ss score=%s\n' "$coin" "$host" "$port" "$label" "$ok" "$total" "$avg" "$best" "$score"
+	else
+		printf '%s %s:%s %s ok=0/%s avg=- best=- score=0\n' "$coin" "$host" "$port" "$label" "$total"
+	fi
+}
+
+pool_test() {
+	coin="$(printf '%s' "${1:-all}" | tr 'A-Z' 'a-z')"
+	duration="${2:-$(cfg pool_test_duration 300)}"
+	interval="${3:-$(cfg pool_test_interval 10)}"
+	timeout="${4:-$(cfg pool_test_timeout 5)}"
+	case "$coin" in btc|zec|all) ;; *) echo "Use: pool-test btc|zec|all [duration_sec] [interval_sec]"; return 1 ;; esac
+	duration="$(num_or_zero "$duration")"
+	interval="$(num_or_zero "$interval")"
+	timeout="$(num_or_zero "$timeout")"
+	[ "$duration" -ge 5 ] 2>/dev/null || duration=5
+	[ "$interval" -ge 1 ] 2>/dev/null || interval=1
+	[ "$timeout" -ge 1 ] 2>/dev/null || timeout=5
+	tmp="$RUNDIR/pool-test-$$.txt"
+	{
+		printf 'Pool test %s: %ss each, interval %ss, timeout %ss\n' "$coin" "$duration" "$interval" "$timeout"
+		printf 'Only TCP connect is tested; ASIC pool settings are not changed.\n'
+	} >"$tmp"
+	best_score=""
+	best_line=""
+	pool_test_targets "$coin" | while read -r tcoin host port label; do
+		[ -n "$host" ] || continue
+		line="$(pool_test_one "$tcoin" "$host" "$port" "$label" "$duration" "$interval" "$timeout")"
+		printf '%s\n' "$line" >>"$tmp"
+	done
+	while IFS= read -r line; do
+		score="$(printf '%s' "$line" | sed -n 's/.* score=\([0-9.][0-9.]*\).*/\1/p')"
+		[ -n "$score" ] || continue
+		if [ -z "$best_score" ] || awk -v a="$score" -v b="$best_score" 'BEGIN { exit !(a > b) }'; then
+			best_score="$score"
+			best_line="$line"
+		fi
+	done <"$tmp"
+	[ -n "$best_line" ] && printf 'Best: %s\n' "$best_line" >>"$tmp"
+	cat "$tmp"
+	rm -f "$tmp"
+}
+
 alert_recommendation() {
 	case "$(status_key "$1")" in
 		overheat)
@@ -2201,6 +2349,17 @@ telegram_handle_command() {
 				telegram_send "Формат: /reboot имя_или_ip" "$chat_id"
 			fi
 			;;
+		pooltest)
+			set -- $args
+			coin="${1:-all}"
+			duration="${2:-$(cfg pool_test_duration 300)}"
+			interval="${3:-$(cfg pool_test_interval 10)}"
+			telegram_send "Pool test started: ${coin}, ${duration}s each, interval ${interval}s. Result will be sent here." "$chat_id"
+			(
+				out="$(pool_test "$coin" "$duration" "$interval" 2>&1)"
+				telegram_send "$out" "$chat_id"
+			) >/dev/null 2>&1 &
+			;;
 		help|start)
 			telegram_send "/status - мониторинг с кнопками
 /miners - тот же список ASIC
@@ -2388,6 +2547,7 @@ case "${1:-status-json}" in
 	status-json) status_json ;;
 	status-text) status_text ;;
 	miners) miners_text ;;
+	pool-test) shift; pool_test "${1:-all}" "${2:-$(cfg pool_test_duration 300)}" "${3:-$(cfg pool_test_interval 10)}" "${4:-$(cfg pool_test_timeout 5)}" ;;
 	telegram-test) if telegram_send "[TEST] ASIC Watchdog Telegram delivery check
 Router: $(cfg router_label "OpenWrt ASIC Watchdog")
 Chat: $(cfg chat_id)"; then echo "telegram test sent to $(cfg chat_id)"; else echo "telegram test failed for $(cfg chat_id)"; exit 1; fi ;;

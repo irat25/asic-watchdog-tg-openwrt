@@ -69,6 +69,9 @@ config_json() {
 	jfield telegram_resolve_ips "$(uci -q get "$CONFIG.main.telegram_resolve_ips" 2>/dev/null || true)"; printf ','
 	jfield telegram_recover_failures "$(uci -q get "$CONFIG.main.telegram_recover_failures" 2>/dev/null || echo 3)"; printf ','
 	jfield telegram_heartbeat_interval "$(uci -q get "$CONFIG.main.telegram_heartbeat_interval" 2>/dev/null || echo 0)"; printf ','
+	jfield pool_test_duration "$(uci -q get "$CONFIG.main.pool_test_duration" 2>/dev/null || echo 300)"; printf ','
+	jfield pool_test_interval "$(uci -q get "$CONFIG.main.pool_test_interval" 2>/dev/null || echo 10)"; printf ','
+	jfield pool_test_timeout "$(uci -q get "$CONFIG.main.pool_test_timeout" 2>/dev/null || echo 5)"; printf ','
 	jfield alert_cooldown "$(uci -q get "$CONFIG.main.alert_cooldown" 2>/dev/null || echo 3600)"; printf ','
 	jfield max_temp "$(uci -q get "$CONFIG.main.max_temp" 2>/dev/null || echo 85)"; printf ','
 	jfield min_hashrate "$(uci -q get "$CONFIG.main.min_hashrate" 2>/dev/null || echo 1)"; printf ','
@@ -132,6 +135,9 @@ save_settings() {
 	uci set "$CONFIG.main.telegram_resolve_ips=$(param telegram_resolve_ips "$@")"
 	uci set "$CONFIG.main.telegram_recover_failures=$(param telegram_recover_failures "$@")"
 	uci set "$CONFIG.main.telegram_heartbeat_interval=$(param telegram_heartbeat_interval "$@")"
+	uci set "$CONFIG.main.pool_test_duration=$(param pool_test_duration "$@")"
+	uci set "$CONFIG.main.pool_test_interval=$(param pool_test_interval "$@")"
+	uci set "$CONFIG.main.pool_test_timeout=$(param pool_test_timeout "$@")"
 	uci set "$CONFIG.main.alert_cooldown=$(param alert_cooldown "$@")"
 	uci set "$CONFIG.main.max_temp=$(param max_temp "$@")"
 	uci set "$CONFIG.main.min_hashrate=$(param min_hashrate "$@")"

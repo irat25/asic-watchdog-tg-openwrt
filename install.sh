@@ -44,6 +44,9 @@ set_default telegram_resolve_ip ''
 set_default telegram_resolve_ips ''
 set_default telegram_recover_failures 3
 set_default telegram_heartbeat_interval 0
+set_default pool_test_duration 300
+set_default pool_test_interval 10
+set_default pool_test_timeout 5
 uci commit asic_watchdog >/dev/null 2>&1 || true
 
 /etc/init.d/asic-watchdog enable >/dev/null 2>&1 || true

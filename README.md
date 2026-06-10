@@ -6,6 +6,33 @@
 
 Репозиторий: <https://github.com/irat25/asic-watchdog-tg-openwrt>
 
+## ViaBTC pool test
+
+Official ViaBTC pool list checked on 2026-06-10:
+
+- BTC Europe: `btc.powhashing.com:3333`, failover `:443`
+- ZEC Europe: `zec.powhashing.com:3002`
+- BTC Global: `btc.viabtc.io`, `btc.viabtc.cc`, `btc.viabtc.top`
+- ZEC Global: `mining.viabtc.io`, `mining.viabtc.top`
+
+CLI:
+
+```sh
+/usr/bin/asic-watchdog pool-test btc 300 10
+/usr/bin/asic-watchdog pool-test zec 300 10
+/usr/bin/asic-watchdog pool-test all 60 10
+```
+
+Telegram:
+
+```text
+/pooltest btc 300 10
+/pooltest zec 300 10
+/pooltest all 60 10
+```
+
+The test measures TCP connect success and latency only. It does not change ASIC pool settings automatically.
+
 ## Что умеет
 
 - добавлять ASIC по IP в LuCI;
