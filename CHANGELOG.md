@@ -2,6 +2,11 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.6.0 - 2026-06-10
+
+- Pool-test results are now sorted from best to worst by score.
+- ASIC detail text now explains bad shares as `Битые шары 24ч: ср. / пик` instead of the shorter `bad ср.` label.
+
 ## 0.5.9 - 2026-06-10
 
 - Changed `/pooltest btc|zec|all 300 10`: `300` is now the total test budget, not 300 seconds for every pool address.

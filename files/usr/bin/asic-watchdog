@@ -928,6 +928,18 @@ pool_test() {
 		line="$(pool_test_one "$tcoin" "$host" "$port" "$label" "$per_target" "$interval" "$timeout")"
 		printf '%s\n' "$line" >>"$tmp"
 	done
+	sorted="$tmp.sorted"
+	header="$(sed -n '1,2p' "$tmp")"
+	{
+		printf '%s\n' "$header"
+		sed '1,2d' "$tmp" | awk '
+			{
+				score = 0
+				if (match($0, /оценка=[0-9.]+/)) score = substr($0, RSTART + 7, RLENGTH - 7) + 0
+				printf "%012.3f %s\n", 1000000 - score, $0
+			}' | sort | sed 's/^[0-9.][0-9.]* //'
+	} >"$sorted"
+	mv "$sorted" "$tmp"
 	while IFS= read -r line; do
 		score="$(printf '%s' "$line" | sed -n 's/.* оценка=\([0-9.][0-9.]*\).*/\1/p')"
 		[ -n "$score" ] || continue
@@ -2060,7 +2072,8 @@ ${ip} · ${model}
 📌 Статус: ${label} (${reason_label})
 ⚡️ Скорость добычи: ${hash_fmt}
 📊 Средняя за 24ч: ${hash_24h_fmt}
-📈 24ч: temp ср. $(format_temp "$temp_avg_24h") / max $(format_temp "$temp_max_24h") · fan min $(format_fan "$fan_min_24h") · bad ср. $(format_percent "$bad_avg_24h")
+📈 24ч: temp ср. $(format_temp "$temp_avg_24h") / max $(format_temp "$temp_max_24h") · fan min $(format_fan "$fan_min_24h")
+📉 Битые шары 24ч: ср. $(format_percent "$bad_avg_24h") / пик $(format_percent "$bad_max_24h")
 🌡 Температура: ${temp_fmt}
 🌀 Вентиляторы: ${fan_rpm:-нет данных} · мин. ${fan_fmt}
 ✅ Разгадал блоков: ${accepted:-0}   ❌ Не отгадал: ${rejected:-0}
