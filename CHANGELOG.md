@@ -2,6 +2,10 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.6.3 - 2026-06-18
+
+- Added detailed Telegram command diagnostics: incoming update id, chat, command/callback routing, send/edit attempts, API rejections and command result are now logged without exposing the bot token.
+
 ## 0.6.2 - 2026-06-18
 
 - Fixed Telegram status panel delivery when ASIC uptime is under one hour: the text no longer contains `<1ч`, which Telegram HTML mode treated as an invalid tag.

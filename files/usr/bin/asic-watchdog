@@ -729,21 +729,32 @@ telegram_send() {
 	text="$1"
 	chat_id="${2:-$(cfg chat_id)}"
 	mode="${3:-plain}"
-	telegram_ready || return 0
-	[ -n "$chat_id" ] || return 0
+	text_len=${#text}
+	if ! telegram_ready; then
+		log_limited telegram_send_not_ready 30 "telegram send skipped reason=not_ready chat=${chat_id:-none} mode=$mode chars=$text_len"
+		return 0
+	fi
+	if [ -z "$chat_id" ]; then
+		log_limited telegram_send_no_chat 30 "telegram send skipped reason=no_chat mode=$mode chars=$text_len"
+		return 0
+	fi
+	log_debug "telegram send start chat=$chat_id mode=$mode chars=$text_len"
 	token="$(cfg bot_token)"
 	encoded="$(printf '%s' "$text" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
 	resp="$(telegram_request_retry sendMessage "$post_data")" || {
-		log "telegram send failed"
+		log "telegram send failed chat=$chat_id mode=$mode chars=$text_len"
 		return 1
 	}
 	case "$resp" in
-		*'"ok":true'*) return 0 ;;
+		*'"ok":true'*)
+			log_debug "telegram send ok chat=$chat_id mode=$mode chars=$text_len"
+			return 0
+			;;
 		*)
 			telegram_note_failure send_rejected
-			log "telegram send rejected: $(printf '%s' "$resp" | cut -c1-220)"
+			log "telegram send rejected chat=$chat_id mode=$mode chars=$text_len response=$(printf '%s' "$resp" | cut -c1-220)"
 			;;
 	esac
 	return 1
@@ -754,22 +765,34 @@ telegram_send_markup() {
 	markup="$2"
 	chat_id="${3:-$(cfg chat_id)}"
 	mode="${4:-plain}"
-	telegram_ready || return 0
-	[ -n "$chat_id" ] || return 0
+	text_len=${#text}
+	markup_len=${#markup}
+	if ! telegram_ready; then
+		log_limited telegram_markup_not_ready 30 "telegram markup skipped reason=not_ready chat=${chat_id:-none} mode=$mode chars=$text_len markup_chars=$markup_len"
+		return 0
+	fi
+	if [ -z "$chat_id" ]; then
+		log_limited telegram_markup_no_chat 30 "telegram markup skipped reason=no_chat mode=$mode chars=$text_len markup_chars=$markup_len"
+		return 0
+	fi
+	log_debug "telegram markup start chat=$chat_id mode=$mode chars=$text_len markup_chars=$markup_len"
 	token="$(cfg bot_token)"
 	encoded_text="$(printf '%s' "$text" | urlencode)"
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
 	resp="$(telegram_request_retry sendMessage "$post_data")" || {
-		log "telegram send markup failed"
+		log "telegram markup failed chat=$chat_id mode=$mode chars=$text_len markup_chars=$markup_len"
 		return 1
 	}
 	case "$resp" in
-		*'"ok":true'*) return 0 ;;
+		*'"ok":true'*)
+			log_debug "telegram markup ok chat=$chat_id mode=$mode chars=$text_len markup_chars=$markup_len"
+			return 0
+			;;
 		*)
 			telegram_note_failure send_markup_rejected
-			log "telegram send markup rejected: $(printf '%s' "$resp" | cut -c1-220)"
+			log "telegram markup rejected chat=$chat_id mode=$mode chars=$text_len markup_chars=$markup_len response=$(printf '%s' "$resp" | cut -c1-220)"
 			;;
 	esac
 	return 1
@@ -781,22 +804,34 @@ telegram_edit_markup() {
 	chat_id="$3"
 	message_id="$4"
 	mode="${5:-plain}"
-	telegram_ready || return 0
-	[ -n "$chat_id" ] && [ -n "$message_id" ] || return 1
+	text_len=${#text}
+	markup_len=${#markup}
+	if ! telegram_ready; then
+		log_limited telegram_edit_not_ready 30 "telegram edit skipped reason=not_ready chat=${chat_id:-none} message=${message_id:-none} mode=$mode chars=$text_len markup_chars=$markup_len"
+		return 0
+	fi
+	if [ -z "$chat_id" ] || [ -z "$message_id" ]; then
+		log "telegram edit skipped reason=missing_target chat=${chat_id:-none} message=${message_id:-none} mode=$mode chars=$text_len markup_chars=$markup_len"
+		return 1
+	fi
+	log_debug "telegram edit start chat=$chat_id message=$message_id mode=$mode chars=$text_len markup_chars=$markup_len"
 	token="$(cfg bot_token)"
 	encoded_text="$(printf '%s' "$text" | urlencode)"
 	encoded_markup="$(printf '%s' "$markup" | urlencode)"
 	post_data="chat_id=$chat_id&message_id=$message_id&text=$encoded_text&reply_markup=$encoded_markup"
 	[ "$mode" = "html" ] && post_data="$post_data&parse_mode=HTML&disable_web_page_preview=true"
 	resp="$(telegram_request_retry editMessageText "$post_data")" || {
-		log "telegram edit markup failed"
+		log "telegram edit failed chat=$chat_id message=$message_id mode=$mode chars=$text_len markup_chars=$markup_len"
 		return 1
 	}
 	case "$resp" in
-		*'"ok":true'*) return 0 ;;
+		*'"ok":true'*)
+			log_debug "telegram edit ok chat=$chat_id message=$message_id mode=$mode chars=$text_len markup_chars=$markup_len"
+			return 0
+			;;
 		*)
 			telegram_note_failure edit_markup_rejected
-			log "telegram edit markup rejected: $(printf '%s' "$resp" | cut -c1-220)"
+			log "telegram edit rejected chat=$chat_id message=$message_id mode=$mode chars=$text_len markup_chars=$markup_len response=$(printf '%s' "$resp" | cut -c1-220)"
 			;;
 	esac
 	return 1
@@ -815,10 +850,23 @@ miner_link() {
 telegram_answer_callback() {
 	callback_id="$1"
 	text="$2"
-	telegram_ready || return 0
-	[ -n "$callback_id" ] || return 0
+	if ! telegram_ready; then
+		log_limited telegram_callback_not_ready 30 "telegram callback ack skipped reason=not_ready callback=${callback_id:-none}"
+		return 0
+	fi
+	if [ -z "$callback_id" ]; then
+		log "telegram callback ack skipped reason=no_callback_id"
+		return 0
+	fi
 	encoded_text="$(printf '%s' "$text" | urlencode)"
-	telegram_request answerCallbackQuery "callback_query_id=$callback_id&text=$encoded_text" >/dev/null 2>&1 || true
+	resp="$(telegram_request answerCallbackQuery "callback_query_id=$callback_id&text=$encoded_text")" || {
+		log "telegram callback ack failed callback=$callback_id"
+		return 0
+	}
+	case "$resp" in
+		*'"ok":true'*) log_debug "telegram callback ack ok callback=$callback_id chars=${#text}" ;;
+		*) log "telegram callback ack rejected callback=$callback_id response=$(printf '%s' "$resp" | cut -c1-180)" ;;
+	esac
 }
 
 status_badge() {
@@ -2424,8 +2472,11 @@ telegram_handle_callback() {
 	data="$2"
 	callback_id="$3"
 	message_id="$4"
+	update_id="$5"
 	allowed="$(cfg chat_id)"
+	log "telegram callback received update_id=${update_id:-unknown} chat=$chat_id allowed=$allowed message=${message_id:-none} data=${data:-empty}"
 	[ "$chat_id" = "$allowed" ] || {
+		log "telegram callback ignored update_id=${update_id:-unknown} chat=$chat_id allowed=$allowed data=${data:-empty}"
 		telegram_answer_callback "$callback_id" "Нет доступа"
 		return 0
 	}
@@ -2497,48 +2548,76 @@ $out" "$chat_id"
 		cancel)
 			telegram_answer_callback "$callback_id" "Отменено"
 			;;
+		*)
+			log "telegram callback unknown update_id=${update_id:-unknown} chat=$chat_id data=${data:-empty}"
+			telegram_answer_callback "$callback_id" "Неизвестная кнопка"
+			;;
 	esac
+	log_debug "telegram callback done update_id=${update_id:-unknown} chat=$chat_id data=${data:-empty}"
 }
 
 telegram_handle_command() {
 	chat_id="$1"
 	text="$2"
+	update_id="$3"
 	allowed="$(cfg chat_id)"
 	cmd="$(printf '%s' "$text" | awk '{ print $1 }')"
 	cmd_base="$(printf '%s' "$cmd" | sed 's#^\\*/*##; s#@.*##; s#[^A-Za-z0-9_-].*$##')"
 	args="$(printf '%s' "$text" | sed 's/^[^ ][^ ]*[ ]*//')"
+	text_len=${#text}
+	log "telegram command received update_id=${update_id:-unknown} chat=$chat_id allowed=$allowed cmd=${cmd_base:-empty} text_chars=$text_len"
 
 	case "$cmd_base" in
 		chatid)
-			telegram_send "Chat ID: $chat_id
-Укажи это значение в LuCI -> Services -> ASIC Watchdog -> Chat / Group ID." "$chat_id"
+			if telegram_send "Chat ID: $chat_id
+Укажи это значение в LuCI -> Services -> ASIC Watchdog -> Chat / Group ID." "$chat_id"; then
+				log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=chatid result=sent"
+			else
+				log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=chatid"
+			fi
 			return 0
 			;;
 	esac
 
 	[ "$chat_id" = "$allowed" ] || {
-		log "telegram command ignored chat=$chat_id allowed=$allowed cmd=$cmd_base"
+		log "telegram command ignored update_id=${update_id:-unknown} chat=$chat_id allowed=$allowed cmd=$cmd_base"
 		return 0
 	}
-	log "telegram command chat=$chat_id cmd=$cmd_base"
 
 	case "$cmd_base" in
 		menu)
-			telegram_main_menu "$chat_id"
+			if telegram_main_menu "$chat_id"; then
+				log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=menu result=sent"
+			else
+				log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=menu"
+			fi
 			;;
 		status)
-			telegram_status_menu "$chat_id"
+			if telegram_status_menu "$chat_id"; then
+				log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=status result=sent"
+			else
+				log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=status"
+			fi
 			;;
 		miners)
-			telegram_status_menu "$chat_id"
+			if telegram_status_menu "$chat_id"; then
+				log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=miners result=sent"
+			else
+				log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=miners"
+			fi
 			;;
 		reboot)
 			target="$args"
 			if [ -n "$target" ]; then
 				out="$(reboot_miner "$target" 2>&1)"
-				telegram_send "$out" "$chat_id"
+				if telegram_send "$out" "$chat_id"; then
+					log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=reboot result=sent target_chars=${#target}"
+				else
+					log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=reboot target_chars=${#target}"
+				fi
 			else
 				telegram_send "Формат: /reboot имя_или_ip" "$chat_id"
+				log "telegram command rejected update_id=${update_id:-unknown} chat=$chat_id cmd=reboot reason=no_target"
 			fi
 			;;
 		pooltest)
@@ -2547,18 +2626,33 @@ telegram_handle_command() {
 			duration="${2:-$(cfg pool_test_duration 300)}"
 			interval="${3:-$(cfg pool_test_interval 10)}"
 			telegram_pooltest_async "$chat_id" "$coin" "$duration" "$interval"
+			log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=pooltest coin=$coin duration=$duration interval=$interval result=started"
 			;;
 		help)
-			telegram_send "$(telegram_help_text)" "$chat_id"
+			if telegram_send "$(telegram_help_text)" "$chat_id"; then
+				log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=help result=sent"
+			else
+				log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=help"
+			fi
 			;;
 		start)
-			telegram_main_menu "$chat_id"
+			if telegram_main_menu "$chat_id"; then
+				log "telegram command done update_id=${update_id:-unknown} chat=$chat_id cmd=start result=sent"
+			else
+				log "telegram command failed update_id=${update_id:-unknown} chat=$chat_id cmd=start"
+			fi
 			;;
 		help_legacy_disabled)
 			telegram_send "/status - мониторинг с кнопками
 /miners - тот же список ASIC
 /reboot имя_или_ip - перезагрузка вручную
 /chatid - показать ID этой группы" "$chat_id"
+			;;
+		*)
+			log "telegram command unknown update_id=${update_id:-unknown} chat=$chat_id cmd=${cmd_base:-empty}"
+			case "$cmd" in
+				/*) telegram_send "Неизвестная команда. Напиши /menu или /help." "$chat_id" ;;
+			esac
 			;;
 	esac
 }
@@ -2599,12 +2693,14 @@ telegram_poll() {
 	telegram_ready || return 0
 	telegram_poll_lock || return 0
 	offset="$(cat "$TG_OFFSET_FILE" 2>/dev/null || echo 0)"
+	log_debug "telegram poll start offset=$offset"
 	json="$(telegram_request "getUpdates" "timeout=0&offset=$offset")" || {
 		log_limited telegram_poll_failed 60 "telegram poll failed"
 		telegram_poll_unlock
 		return 0
 	}
 	if [ -z "$json" ]; then
+		log_debug "telegram poll empty_response offset=$offset"
 		telegram_poll_unlock
 		return 0
 	fi
@@ -2618,6 +2714,8 @@ telegram_poll() {
 			;;
 	esac
 
+	update_count="$(printf '%s' "$json" | grep -o '"update_id":' 2>/dev/null | wc -l | tr -d ' ')"
+	log_debug "telegram poll ok offset=$offset updates=${update_count:-0} bytes=${#json}"
 	printf '%s' "$json" | telegram_update_lines | while IFS= read -r item; do
 		update_id="$(printf '%s' "$item" | sed -n 's/.*"update_id":\([0-9][0-9]*\).*/\1/p')"
 		callback_data="$(json_string_field_after "$item" '"callback_query":' data)"
@@ -2653,15 +2751,22 @@ telegram_poll() {
 			[ -n "$chat_id" ] || chat_id="$(json_chat_id_any "$item")"
 			[ -n "$text" ] || text="$(json_string_field "$item" text)"
 		fi
-		[ -n "$update_id" ] && echo $((update_id + 1)) >"$TG_OFFSET_FILE"
+		if [ -n "$update_id" ]; then
+			next_offset=$((update_id + 1))
+			echo "$next_offset" >"$TG_OFFSET_FILE"
+			log_debug "telegram offset advanced update_id=$update_id next=$next_offset"
+		fi
 		if [ -n "$chat_id" ] && [ -n "$callback_data" ]; then
-			telegram_handle_callback "$chat_id" "$callback_data" "$callback_id" "$message_id"
+			log_debug "telegram update dispatch update_id=${update_id:-unknown} kind=callback chat=$chat_id message=${message_id:-none} data=${callback_data:-empty}"
+			telegram_handle_callback "$chat_id" "$callback_data" "$callback_id" "$message_id" "$update_id"
 		elif [ -n "$chat_id" ] && [ -n "$text" ]; then
-			telegram_handle_command "$chat_id" "$text"
+			log_debug "telegram update dispatch update_id=${update_id:-unknown} kind=message chat=$chat_id text_chars=${#text}"
+			telegram_handle_command "$chat_id" "$text" "$update_id"
 		elif [ -n "$update_id" ]; then
 			log "telegram update ignored update_id=$update_id chat=${chat_id:-unknown} no_text_or_callback raw=$(printf '%s' "$item" | cut -c1-180)"
 		fi
 	done
+	log_debug "telegram poll done offset_start=$offset"
 	telegram_poll_unlock
 }
 
