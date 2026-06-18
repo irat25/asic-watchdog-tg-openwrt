@@ -2,6 +2,10 @@
 
 Все заметные правки пакета фиксируются здесь.
 
+## 0.6.2 - 2026-06-18
+
+- Fixed Telegram status panel delivery when ASIC uptime is under one hour: the text no longer contains `<1ч`, which Telegram HTML mode treated as an invalid tag.
+
 ## 0.6.1 - 2026-06-10
 
 - Added detailed Telegram transport logging: method, Telegram IP, attempt number, duration, curl rc and short error text.

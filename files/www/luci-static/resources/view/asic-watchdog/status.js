@@ -121,7 +121,7 @@ function formatUptime(value) {
 		return d + 'д ' + h + 'ч';
 	if (h > 0)
 		return h + 'ч';
-	return '<1ч';
+	return 'до 1ч';
 }
 
 function formatPing(value) {

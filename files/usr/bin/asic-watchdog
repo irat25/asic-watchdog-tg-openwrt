@@ -2028,7 +2028,7 @@ format_uptime() {
 		h = int((s % 86400) / 3600)
 		if (d > 0) printf "%dд %dч", d, h
 		else if (h > 0) printf "%dч", h
-		else printf "<1ч"
+		else printf "до 1ч"
 	}'
 }
 
